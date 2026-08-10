@@ -429,7 +429,11 @@ impl MultiBuffer {
             let Some(next_excerpt) = to_insert.peek() else {
                 break;
             };
-            if excerpt.range.context == next_excerpt.context {
+            let context_anchors_match = excerpt.range.context == next_excerpt.context;
+            if context_anchors_match
+                || excerpt.range.context.to_offset(buffer_snapshot)
+                    == next_excerpt.context.to_offset(buffer_snapshot)
+            {
                 let before = new_excerpts.summary().len();
                 new_excerpts.update_last(
                     |prev_excerpt| {
@@ -443,11 +447,25 @@ impl MultiBuffer {
                     },
                     (),
                 );
-                let mut reused_excerpt = excerpt.clone();
-                if reused_excerpt.range.primary != next_excerpt.primary {
-                    reused_excerpt.range.primary = next_excerpt.primary.clone();
-                    primary_ranges_changed = true;
-                }
+                let primary_offsets_changed = excerpt.range.primary != next_excerpt.primary
+                    && excerpt.range.primary.to_offset(buffer_snapshot)
+                        != next_excerpt.primary.to_offset(buffer_snapshot);
+                primary_ranges_changed |= primary_offsets_changed;
+                let reused_excerpt = if context_anchors_match {
+                    let mut reused_excerpt = excerpt.clone();
+                    if reused_excerpt.range.primary != next_excerpt.primary {
+                        reused_excerpt.range.primary = next_excerpt.primary.clone();
+                    }
+                    reused_excerpt
+                } else {
+                    Excerpt::new(
+                        path_key.clone(),
+                        path_key_index,
+                        buffer_snapshot,
+                        (*next_excerpt).clone(),
+                        excerpt.has_trailing_newline,
+                    )
+                };
                 new_excerpts.push(reused_excerpt, ());
                 to_insert.next();
                 cursor.next();
@@ -627,24 +645,47 @@ impl MultiBuffer {
         added_new_excerpt
     }
 
-    /// Groups position-ordered `ranges` by the [`PathKey`] of their start anchor, preserving order.
-    /// Ranges whose start anchor is not tied to an excerpt path are skipped.
-    pub fn group_ranges_by_path(
+    pub fn ranges_grouped_by_excerpt_path(
         &self,
-        ranges: impl IntoIterator<Item = Range<Anchor>>,
-    ) -> Vec<(PathKey, Vec<Range<Anchor>>)> {
+        ranges: &[Range<Anchor>],
+    ) -> Vec<(PathKey, Range<usize>)> {
         let snapshot = self.snapshot.borrow();
-        let mut grouped: Vec<(PathKey, Vec<Range<Anchor>>)> = Vec::new();
-        for range in ranges {
-            let Anchor::Excerpt(anchor) = &range.start else {
-                continue;
+        let mut grouped: Vec<(PathKey, Range<usize>)> = Vec::new();
+        let mut next_range_index = 0;
+        for excerpt in snapshot.excerpts.iter() {
+            while ranges
+                .get(next_range_index)
+                .is_some_and(|range| match &range.start {
+                    Anchor::Excerpt(anchor) => {
+                        anchor.path != excerpt.path_key_index
+                            && snapshot
+                                .path_keys
+                                .get_index(anchor.path.0 as usize)
+                                .is_some_and(|path| path < &excerpt.path_key)
+                    }
+                    Anchor::Min | Anchor::Max => false,
+                })
+            {
+                next_range_index += 1;
+            }
+            let span_start = match grouped.last() {
+                Some((last_path, span)) if *last_path == excerpt.path_key => span.start,
+                _ => next_range_index,
             };
-            let Some(path_key) = snapshot.path_keys.get_index(anchor.path.0 as usize) else {
-                continue;
-            };
+            while ranges
+                .get(next_range_index)
+                .is_some_and(|range| match &range.start {
+                    Anchor::Excerpt(anchor) => anchor.path == excerpt.path_key_index,
+                    Anchor::Min | Anchor::Max => false,
+                })
+            {
+                next_range_index += 1;
+            }
             match grouped.last_mut() {
-                Some((last_path, last_ranges)) if last_path == path_key => last_ranges.push(range),
-                _ => grouped.push((path_key.clone(), vec![range])),
+                Some((last_path, span)) if *last_path == excerpt.path_key => {
+                    span.end = next_range_index;
+                }
+                _ => grouped.push((excerpt.path_key.clone(), span_start..next_range_index)),
             }
         }
         grouped

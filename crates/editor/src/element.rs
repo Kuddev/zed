@@ -1354,22 +1354,23 @@ impl EditorElement {
             .then_some(content_offset)
             .unwrap_or_default();
 
-        let is_rewrapping = self.editor.read(cx).display_map.read(cx).is_rewrapping(cx);
-        let frozen_layout_information = self
-            .editor
-            .update(cx, |editor, _| {
-                editor.frozen_scroll_range_width(
+        let frozen = if self.editor.read(cx).scroll_range_hold.is_some() {
+            let is_rewrapping = self.editor.read(cx).display_map.read(cx).is_rewrapping(cx);
+            self.editor.update(cx, |editor, _| {
+                editor.frozen_scroll_range(
                     is_rewrapping,
-                    scrollbar_layout_information.scroll_range.width,
+                    scrollbar_layout_information.scroll_range,
+                    editor_width,
                 )
             })
-            .map(|scroll_range_width| ScrollbarLayoutInformation {
-                scroll_range: size(
-                    scroll_range_width,
-                    scrollbar_layout_information.scroll_range.height,
-                ),
-                ..*scrollbar_layout_information
-            });
+        } else {
+            None
+        };
+        let frozen_layout_information = frozen.map(|settled| ScrollbarLayoutInformation {
+            scroll_range: settled.range,
+            ..*scrollbar_layout_information
+        });
+        let effective_editor_width = frozen.map_or(editor_width, |settled| settled.editor_width);
 
         Some(EditorScrollbars::from_scrollbar_axes(
             ScrollbarAxes {
@@ -1385,7 +1386,7 @@ impl EditorElement {
             scroll_position,
             self.style.scrollbar_width,
             right_margin,
-            editor_width,
+            effective_editor_width,
             show_scrollbars,
             self.editor.read(cx).scroll_manager.active_scrollbar_state(),
             window,

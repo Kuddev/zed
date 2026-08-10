@@ -939,6 +939,133 @@ fn test_set_excerpts_for_path_reuses_excerpts_when_only_primary_changes(cx: &mut
 }
 
 #[gpui::test]
+fn test_set_excerpts_for_path_reuses_excerpts_after_edits_shift_anchors(cx: &mut App) {
+    let buffer = cx.new(|cx| Buffer::local(sample_text(20, 6, 'a'), cx));
+    let multibuffer = cx.new(|_| MultiBuffer::new(Capability::ReadWrite));
+    let path = PathKey::for_buffer(&buffer, cx);
+
+    multibuffer.update(cx, |multibuffer, cx| {
+        multibuffer.set_excerpts_for_path(
+            path.clone(),
+            buffer.clone(),
+            vec![Point::new(10, 0)..Point::new(10, 1)],
+            2,
+            cx,
+        );
+    });
+    let text = multibuffer.read(cx).snapshot(cx).text();
+
+    let excerpt_edit_count = Arc::new(RwLock::new(0));
+    let ranges_updated_event_count = Arc::new(RwLock::new(0));
+    multibuffer.update(cx, |_, cx| {
+        cx.subscribe(&multibuffer, {
+            let excerpt_edit_count = excerpt_edit_count.clone();
+            let ranges_updated_event_count = ranges_updated_event_count.clone();
+            move |_, _, event, _| match event {
+                Event::Edited {
+                    edited_buffer: None,
+                    ..
+                } => *excerpt_edit_count.write() += 1,
+                Event::BufferRangesUpdated { .. } => *ranges_updated_event_count.write() += 1,
+                _ => {}
+            }
+        })
+        .detach();
+    });
+
+    buffer.update(cx, |buffer, cx| {
+        buffer.edit([(Point::new(0, 0)..Point::new(0, 0), "zzzzzz\n")], None, cx)
+    });
+    multibuffer.update(cx, |multibuffer, cx| {
+        multibuffer.set_excerpts_for_path(
+            path,
+            buffer,
+            vec![Point::new(11, 0)..Point::new(11, 1)],
+            2,
+            cx,
+        );
+    });
+    assert_eq!(
+        multibuffer.read(cx).snapshot(cx).text(),
+        text,
+        "an edit above the excerpt shifts the match but not its content, so the shown text \
+         must stay the same"
+    );
+    assert_eq!(
+        *excerpt_edit_count.read(),
+        0,
+        "the shifted excerpt covers the same buffer content, so it must be reused as is \
+         instead of being replaced"
+    );
+    assert_eq!(
+        *ranges_updated_event_count.read(),
+        0,
+        "the shifted primary range covers the same buffer content, so no range update \
+         must be reported"
+    );
+}
+
+#[gpui::test]
+fn test_ranges_grouped_by_excerpt_path_skips_stale_ranges(cx: &mut App) {
+    let buffer_a = cx.new(|cx| Buffer::local(sample_text(6, 6, 'a'), cx));
+    let buffer_b = cx.new(|cx| Buffer::local(sample_text(6, 6, 'g'), cx));
+    let buffer_c = cx.new(|cx| Buffer::local(sample_text(6, 6, 'm'), cx));
+    let multibuffer = cx.new(|_| MultiBuffer::new(Capability::ReadWrite));
+    let path_a = PathKey::sorted(0);
+    let path_b = PathKey::sorted(1);
+    let path_c = PathKey::sorted(2);
+
+    multibuffer.update(cx, |multibuffer, cx| {
+        for (path, buffer) in [
+            (path_a.clone(), &buffer_a),
+            (path_b.clone(), &buffer_b),
+            (path_c.clone(), &buffer_c),
+        ] {
+            multibuffer.set_excerpts_for_path(
+                path,
+                buffer.clone(),
+                vec![Point::new(2, 0)..Point::new(2, 3)],
+                1,
+                cx,
+            );
+        }
+    });
+
+    let snapshot = multibuffer.read(cx).snapshot(cx);
+    let ranges = [&buffer_a, &buffer_b, &buffer_c]
+        .into_iter()
+        .map(|buffer| {
+            let buffer_snapshot = buffer.read(cx).snapshot();
+            let start = buffer_snapshot.anchor_before(Point::new(2, 0));
+            let end = buffer_snapshot.anchor_after(Point::new(2, 3));
+            snapshot
+                .anchor_range_in_buffer(start..end)
+                .expect("the buffer has excerpts")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        multibuffer.read(cx).ranges_grouped_by_excerpt_path(&ranges),
+        vec![
+            (path_a.clone(), 0..1),
+            (path_b.clone(), 1..2),
+            (path_c.clone(), 2..3),
+        ]
+    );
+
+    multibuffer.update(cx, |multibuffer, cx| {
+        multibuffer.remove_excerpts(path_b, cx);
+    });
+
+    assert_eq!(
+        multibuffer.read(cx).ranges_grouped_by_excerpt_path(&ranges),
+        vec![(path_a, 0..1), (path_c, 2..3)],
+        "a range whose path lost its excerpts must be skipped instead of blocking the \
+         consumption of every range that follows it"
+    );
+}
+
+#[gpui::test]
 fn test_expand_excerpts(cx: &mut App) {
     let buffer = cx.new(|cx| Buffer::local(sample_text(20, 3, 'a'), cx));
     let multibuffer = cx.new(|_| MultiBuffer::new(Capability::ReadWrite));

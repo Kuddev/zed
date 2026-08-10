@@ -21,7 +21,7 @@ use parking_lot::Mutex;
 use postage::oneshot;
 use rpc::{AnyProtoClient, proto};
 
-use util::{ResultExt, maybe, paths::compare_rel_paths, rel_path::RelPath};
+use util::{ResultExt, maybe, rel_path::RelPath};
 use worktree::{Entry, ProjectEntryId, Snapshot, Worktree, WorktreeSettings};
 
 use crate::{
@@ -166,6 +166,7 @@ impl Search {
         let mut open_buffers = HashSet::default();
         let mut unnamed_buffers = Vec::new();
         const MAX_CONCURRENT_BUFFER_OPENS: usize = 64;
+        let searches_all_unnamed_buffers = !matches!(self.kind, SearchKind::OpenBuffersOnly);
         let buffers = self.buffer_store.read(cx);
         for handle in buffers.buffers() {
             let buffer = handle.read(cx);
@@ -178,14 +179,14 @@ impl Search {
                 continue;
             } else if let Some(entry_id) = buffer.entry_id(cx) {
                 open_buffers.insert(entry_id);
-            } else {
+            } else if searches_all_unnamed_buffers {
                 self.limit = self.limit.saturating_sub(1);
                 unnamed_buffers.push(handle)
             };
         }
         // Results are consumed in `PathKey` order downstream; fileless buffers get a `PathKey`
         // built from the stringified `EntityId` (see `PathKey::for_buffer`), so match that here.
-        unnamed_buffers.sort_by_cached_key(|buffer| buffer.entity_id().to_string());
+        unnamed_buffers.sort_by_cached_key(|buffer| path_key_sort_key(buffer, cx));
         let open_buffers = Arc::new(open_buffers);
         let executor = cx.background_executor().clone();
         let (tx, rx) = unbounded();
@@ -651,18 +652,24 @@ impl Search {
             })
             .cloned()
             .collect::<Vec<_>>();
-        buffers.sort_by(|a, b| {
-            let a = a.read(cx);
-            let b = b.read(cx);
-            match (a.file(), b.file()) {
-                (None, None) => a.remote_id().cmp(&b.remote_id()),
-                (None, Some(_)) => std::cmp::Ordering::Less,
-                (Some(_), None) => std::cmp::Ordering::Greater,
-                (Some(a), Some(b)) => compare_rel_paths((a.path(), true), (b.path(), true)),
-            }
-        });
+        buffers.sort_by_cached_key(|buffer| path_key_sort_key(buffer, cx));
+        buffers.dedup_by_key(|buffer| buffer.entity_id());
 
         buffers
+    }
+}
+
+fn path_key_sort_key(
+    buffer: &Entity<Buffer>,
+    cx: &App,
+) -> (Option<u64>, Option<Arc<RelPath>>, String) {
+    match buffer.read(cx).file() {
+        Some(file) => (
+            Some(file.worktree_id(cx).to_proto()),
+            Some(file.path().clone()),
+            String::new(),
+        ),
+        None => (None, None, buffer.entity_id().to_string()),
     }
 }
 

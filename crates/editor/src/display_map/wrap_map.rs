@@ -303,7 +303,7 @@ impl WrapMap {
                 .flat_map(|(_, tab_edits)| tab_edits.iter())
                 .map(|edit| (edit.new.end.row().saturating_sub(edit.new.start.row()) + 1) as usize)
                 .sum::<usize>();
-            if total_new_rows < WRAP_YIELD_ROW_INTERVAL {
+            if pending_edits.len() + total_new_rows < WRAP_YIELD_ROW_INTERVAL {
                 let mut wrap_edits = Patch::default();
                 for (tab_snapshot, tab_edits) in pending_edits {
                     let edits = gpui::block_on(snapshot.update(
