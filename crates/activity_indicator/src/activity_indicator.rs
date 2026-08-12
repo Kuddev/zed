@@ -4,7 +4,7 @@ use extension_host::{ExtensionOperation, ExtensionStore};
 use futures::StreamExt;
 use gpui::{
     App, Context, Entity, EventEmitter, InteractiveElement as _, ParentElement as _, Render,
-    SharedString, Styled, Window, actions,
+    SharedString, Styled, Task, Window, actions,
 };
 use language::{
     BinaryStatus, LanguageRegistry, LanguageServerId, LanguageServerName,
@@ -27,6 +27,7 @@ use util::truncate_and_trailoff;
 use workspace::{StatusItemView, Workspace, item::ItemHandle};
 
 const GIT_OPERATION_DELAY: Duration = Duration::from_millis(0);
+pub const DEFERRED_SCAN_MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
 
 actions!(
     activity_indicator,
@@ -48,12 +49,19 @@ pub struct ActivityIndicator {
     project: Entity<Project>,
     context_menu_handle: PopoverMenuHandle<ContextMenu>,
     fs_jobs: Vec<fs::JobInfo>,
+    deferred_scan_status: Option<DeferredScanStatus>,
+    last_deferred_scan_dir_count: usize,
 }
 
 #[derive(Debug)]
 struct ServerStatus {
     name: LanguageServerName,
     status: LanguageServerStatusUpdate,
+}
+
+struct DeferredScanStatus {
+    deferred_scan_dir_count: usize,
+    _dismiss_task: Task<()>,
 }
 
 struct PendingWork<'a> {
@@ -67,9 +75,9 @@ enum ActivityIcon {
     Icon(IconName),
 }
 
-struct Content {
+pub struct Content {
     icon: ActivityIcon,
-    message: String,
+    pub message: String,
     on_click:
         Option<Arc<dyn Fn(&mut ActivityIndicator, &mut Window, &mut Context<ActivityIndicator>)>>,
     tooltip_message: Option<String>,
@@ -215,12 +223,29 @@ impl ActivityIndicator {
             )
             .detach();
 
-            Self {
+            cx.subscribe(
+                &project,
+                |this, _, event: &project::Event, cx| match event {
+                    project::Event::WorktreeAdded(_)
+                    | project::Event::WorktreeRemoved(_)
+                    | project::Event::WorktreeUpdatedEntries(..) => {
+                        this.update_deferred_scan_status(cx);
+                    }
+                    _ => {}
+                },
+            )
+            .detach();
+
+            let mut this = Self {
                 statuses: Vec::new(),
                 project: project.clone(),
                 context_menu_handle: PopoverMenuHandle::default(),
                 fs_jobs: Vec::new(),
-            }
+                deferred_scan_status: None,
+                last_deferred_scan_dir_count: 0,
+            };
+            this.update_deferred_scan_status(cx);
+            this
         });
 
         cx.subscribe_in(&this, window, move |_, _, event, window, cx| match event {
@@ -334,7 +359,41 @@ impl ActivityIndicator {
         self.project.read(cx).peek_environment_error(cx)
     }
 
-    fn content_to_render(&mut self, cx: &mut Context<Self>) -> Option<Content> {
+    fn update_deferred_scan_status(&mut self, cx: &mut Context<Self>) {
+        let deferred_scan_dir_count = self
+            .project
+            .read(cx)
+            .visible_worktrees(cx)
+            .map(|worktree| worktree.read(cx).deferred_scan_dir_count())
+            .sum::<usize>();
+        if deferred_scan_dir_count == self.last_deferred_scan_dir_count {
+            return;
+        }
+        let increased = deferred_scan_dir_count > self.last_deferred_scan_dir_count;
+        self.last_deferred_scan_dir_count = deferred_scan_dir_count;
+        if deferred_scan_dir_count == 0 {
+            self.deferred_scan_status = None;
+        } else if increased {
+            self.deferred_scan_status = Some(DeferredScanStatus {
+                deferred_scan_dir_count,
+                _dismiss_task: cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(DEFERRED_SCAN_MESSAGE_TIMEOUT)
+                        .await;
+                    this.update(cx, |this, cx| {
+                        this.deferred_scan_status = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }),
+            });
+        } else if let Some(deferred_scan_status) = &mut self.deferred_scan_status {
+            deferred_scan_status.deferred_scan_dir_count = deferred_scan_dir_count;
+        }
+        cx.notify();
+    }
+
+    pub fn content_to_render(&mut self, cx: &mut Context<Self>) -> Option<Content> {
         // Show if any direnv calls failed
         if let Some(message) = self.pending_environment_error(cx) {
             return Some(Content {
@@ -634,6 +693,24 @@ impl ActivityIndicator {
                     this.dismiss_message(&Default::default(), window, cx)
                 })),
                 tooltip_message: None,
+            });
+        }
+
+        if let Some(deferred_scan_status) = &self.deferred_scan_status {
+            return Some(Content {
+                icon: ActivityIcon::Icon(IconName::Info),
+                message: "Partial file index".to_string(),
+                tooltip_message: Some(if deferred_scan_status.deferred_scan_dir_count == 1 {
+                    "A directory outside of git repositories and deeper than the `file_scan_depth` setting will be indexed on demand. Click to open the settings file.".to_string()
+                } else {
+                    format!(
+                        "{} directories outside of git repositories and deeper than the `file_scan_depth` setting will be indexed on demand. Click to open the settings file.",
+                        deferred_scan_status.deferred_scan_dir_count
+                    )
+                }),
+                on_click: Some(Arc::new(|_, window, cx| {
+                    window.dispatch_action(Box::new(zed_actions::OpenSettingsFile), cx);
+                })),
             });
         }
 

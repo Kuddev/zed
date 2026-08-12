@@ -2151,6 +2151,33 @@ Note, specifying `file_scan_exclusions` in settings.json will override the defau
 }
 ```
 
+## File Scan Depth
+
+- Setting: `file_scan_depth`
+- Description: Maximum directory depth that Zed eagerly indexes outside of git repositories. Directories beyond this depth are indexed on demand: when expanded in the project panel or when a file inside them is opened. Contents of directories that were not indexed yet are invisible to the file finder and project search. When directories get deferred, the status bar shows a temporary "Partial file index" message. Set to `0` to always index everything eagerly.
+- Default: `8`
+
+```json [settings]
+{
+  "file_scan_depth": 0
+}
+```
+
+How the limit applies, case by case:
+
+| Case                                                                        | Behavior                                                                                                    |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Project rooted at a git repository, or at a subdirectory of one             | Indexed fully, the limit never applies                                                                      |
+| Git repository found within the limit (e.g. a repo a few levels under `~/`) | Its whole subtree is indexed fully, no matter how deep                                                      |
+| Git repository deeper than the limit                                        | Not discovered eagerly; opening any file inside it registers it and indexes its whole subtree from then on  |
+| Non-git tree shallower than the limit                                       | Indexed fully, nothing changes                                                                              |
+| Non-git tree deeper than the limit (e.g. `~/`, `/`, large datasets)         | Indexed up to the limit, the rest on demand; unindexed contents are invisible to the file finder and search |
+| Gitignored directories                                                      | Indexed on demand regardless of this setting, as always                                                     |
+| `file_scan_inclusions` matches                                              | Always indexed, regardless of depth                                                                         |
+| `file_scan_exclusions` matches                                              | Never indexed, regardless of depth                                                                          |
+
+Directories loaded on demand stay indexed for the rest of the session, but are deferred again after a restart.
+
 ## Scan Symbolic Links
 
 - Description: When to scan content of linked directories.
