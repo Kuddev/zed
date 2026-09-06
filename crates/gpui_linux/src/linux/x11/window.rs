@@ -1578,6 +1578,20 @@ impl PlatformWindow for X11Window {
             || "X11 MapWindow failed.",
             self.0.xcb.map_window(self.0.x_window),
         )?;
+
+        // The checked round trip can buffer MapNotify/Expose in XCB while
+        // leaving its fd unreadable. MapNotify starts the refresh timer, so
+        // waiting for another native event can otherwise strand the first
+        // frame. Defer the drain until Window::new releases its App borrow.
+        if let Some(client) = self.0.state.borrow().client.get_client() {
+            let state = client.0.borrow();
+            let connection = self.0.xcb.clone();
+            state.loop_handle.insert_idle(move |client| {
+                client.process_x11_events(&connection).log_err();
+            });
+            // An idle callback alone does not wake a blocked calloop dispatch.
+            state.common.signal.wakeup();
+        }
         Ok(())
     }
 
