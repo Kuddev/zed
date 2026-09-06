@@ -7027,6 +7027,23 @@ mod tests {
             .unwrap();
     }
 
+    #[gpui::test]
+    fn test_virtual_window_handles_report_unavailable(cx: &mut TestAppContext) {
+        use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
+
+        let cx = cx.add_empty_window();
+        cx.update(|window, _| {
+            assert!(matches!(
+                HasWindowHandle::window_handle(window),
+                Err(HandleError::Unavailable)
+            ));
+            assert!(matches!(
+                HasDisplayHandle::display_handle(window),
+                Err(HandleError::Unavailable)
+            ));
+        });
+    }
+
     /// Platforms that stop requesting frames for idle windows (currently web)
     /// rely on the frame waker firing whenever frame demand arises; a demand
     /// source that skips the waker shows up there as a window that silently
