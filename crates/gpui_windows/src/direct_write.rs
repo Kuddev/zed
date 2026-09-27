@@ -1064,6 +1064,14 @@ impl DirectWriteState {
         };
 
         let device_context = &gpu_state.device_context;
+        unsafe {
+            device_context.ClearRenderTargetView(
+                render_target_view
+                    .as_ref()
+                    .context("missing render target view")?,
+                &[0.0; 4],
+            )
+        };
         unsafe { device_context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP) };
         unsafe { device_context.VSSetShader(&gpu_state.vertex_shader, None) };
         unsafe { device_context.PSSetShader(&gpu_state.pixel_shader, None) };
@@ -1930,7 +1938,11 @@ mod tests {
             subpixel_rendering: false,
             dilation: 0,
         };
-        let bounds = text_system.glyph_raster_bounds(&params)?;
+        let mut bounds = text_system.glyph_raster_bounds(&params)?;
+        bounds.origin.x -= DevicePixels(2);
+        bounds.origin.y -= DevicePixels(2);
+        bounds.size.width += DevicePixels(4);
+        bounds.size.height += DevicePixels(4);
         let (_, pixels) = text_system.rasterize_glyph(&params, bounds)?;
         assert!(
             pixels
@@ -1938,6 +1950,27 @@ mod tests {
                 .any(|pixel| { pixel[3] > 0 && (pixel[0] != pixel[1] || pixel[1] != pixel[2]) }),
             "emoji must contain colored pixels instead of the black fallback"
         );
+        let width = bounds.size.width.0 as usize;
+        let height = bounds.size.height.0 as usize;
+        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            let x = index % width;
+            let y = index / width;
+            if x == 0 || y == 0 || x == width - 1 || y == height - 1 {
+                assert_eq!(pixel, [0; 4], "uncovered border must stay transparent");
+            }
+            if pixel[3] == 0 {
+                assert_eq!(pixel, [0; 4], "transparent pixels must not retain color");
+            }
+        }
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel[3] > 0 && pixel[3] < 255)
+        );
+        for _ in 0..3 {
+            let (_, repeated) = text_system.rasterize_glyph(&params, bounds)?;
+            assert_eq!(pixels, repeated, "rasterization must be repeatable");
+        }
         Ok(())
     }
 
