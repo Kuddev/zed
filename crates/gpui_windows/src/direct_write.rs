@@ -918,7 +918,7 @@ impl DirectWriteState {
 
         let mut glyph_layers = Vec::new();
         let mut alpha_data = Vec::new();
-        loop {
+        while unsafe { color_enumerator.MoveNext() }?.as_bool() {
             let color_run = unsafe { color_enumerator.GetCurrentRun() }?;
             let color_run = unsafe { &*color_run };
             let image_format = color_run.glyphImageFormat & !DWRITE_GLYPH_IMAGE_FORMATS_TRUETYPE;
@@ -971,13 +971,6 @@ impl DirectWriteState {
                         &alpha_data,
                     )?);
                 }
-            }
-
-            let has_next = unsafe { color_enumerator.MoveNext() }
-                .map(|e| e.as_bool())
-                .unwrap_or(false);
-            if !has_next {
-                break;
             }
         }
 
@@ -1916,6 +1909,37 @@ const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
 #[cfg(test)]
 mod tests {
     use crate::direct_write::ClusterAnalyzer;
+
+    #[test]
+    fn color_emoji_rasterization_preserves_color() -> anyhow::Result<()> {
+        use super::*;
+
+        let devices = DirectXDevices::new()?;
+        let text_system = DirectWriteTextSystem::new(&devices)?;
+        let font_id = text_system.font_id(&font("Segoe UI Emoji"))?;
+        let glyph_id = text_system
+            .glyph_for_char(font_id, '😀')
+            .expect("emoji glyph");
+        let params = RenderGlyphParams {
+            font_id,
+            glyph_id,
+            font_size: px(32.0),
+            subpixel_variant: point(0, 0),
+            scale_factor: 1.0,
+            is_emoji: true,
+            subpixel_rendering: false,
+            dilation: 0,
+        };
+        let bounds = text_system.glyph_raster_bounds(&params)?;
+        let (_, pixels) = text_system.rasterize_glyph(&params, bounds)?;
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .any(|pixel| { pixel[3] > 0 && (pixel[0] != pixel[1] || pixel[1] != pixel[2]) }),
+            "emoji must contain colored pixels instead of the black fallback"
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_cluster_map() {
