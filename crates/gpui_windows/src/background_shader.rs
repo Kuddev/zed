@@ -12,12 +12,18 @@ struct ProgramCache {
     device: ID3D11Device,
     programs: Mutex<Vec<Weak<Program>>>,
 }
-struct Program {
-    vertex: ID3D11VertexShader,
-    fragment: ID3D11PixelShader,
+pub(in crate::directx_atlas) struct Program {
+    pub(in crate::directx_atlas) vertex: ID3D11VertexShader,
+    pub(in crate::directx_atlas) fragment: ID3D11PixelShader,
     bytecode: Arc<[u8]>,
     // A live program retains its device cache; weak entries release dead programs.
     _cache: Arc<ProgramCache>,
+}
+pub(in crate::directx_atlas) fn prepare_program(
+    device: &ID3D11Device,
+    bytecode: &[u8],
+) -> anyhow::Result<Arc<Program>> {
+    device_cache(device)?.prepare(Arc::from(bytecode))
 }
 fn device_cache(device: &ID3D11Device) -> anyhow::Result<Arc<ProgramCache>> {
     static CACHES: OnceLock<Mutex<Vec<Weak<ProgramCache>>>> = OnceLock::new();
@@ -90,7 +96,7 @@ impl NativeBackgroundShader {
         texture: &ID3D11Texture2D,
         fragment: &[u8],
     ) -> anyhow::Result<Self> {
-        let program = device_cache(device)?.prepare(Arc::from(fragment))?;
+        let program = prepare_program(device, fragment)?;
         let mut target = None;
         unsafe { device.CreateRenderTargetView(texture, None, Some(&mut target)) }?;
         let mut uniforms = None;

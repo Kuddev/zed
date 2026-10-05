@@ -267,6 +267,28 @@ impl StreamImageHandle {
     pub fn adopt_background_shader(&self, prepared: PreparedBackgroundShader) -> Result<()> {
         self.0.atlas.adopt_background_shader(self.0.id, prepared)
     }
+
+    /// Prepares a chain off the owning UI thread, using the same admission as media.
+    pub fn prepare_postprocess(
+        &self,
+        descriptor: crate::PostprocessDescriptor,
+        cancellation: BackgroundShaderCancellation,
+    ) -> Result<StreamImagePreparation> {
+        descriptor.validate()?;
+        let lease = self.0.budgets.reserve_preparation()?;
+        let work = self.0.atlas.postprocess_factory(
+            self.0.id,
+            &self.0.budgets,
+            descriptor,
+            cancellation,
+        )?;
+        Ok(StreamImagePreparation { work, _lease: lease })
+    }
+
+    /// Adopts an unsubmitted chain only on the native owner's device and thread.
+    pub fn adopt_postprocess(&self, prepared: PreparedStreamImage) -> Result<()> {
+        self.0.atlas.adopt_postprocess(self.0.id, prepared)
+    }
     /// Captures a WGSL native factory; unsupported backends return an explicit error.
     pub fn prepare_background_wgsl(
         &self,

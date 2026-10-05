@@ -731,6 +731,13 @@ impl MetalRenderer {
                     viewport_size,
                     command_encoder,
                 ),
+                PrimitiveBatch::Postprocesses(range) => {
+                    for effect in &scene.postprocesses[range] {
+                        effect.feedback.record_error(
+                            "surface post-processing is not available on this backend".into(),
+                        );
+                    }
+                }
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }

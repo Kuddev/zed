@@ -14,8 +14,6 @@ mod app;
 mod arena;
 mod asset_cache;
 mod assets;
-mod stream_image;
-mod stream_image_budget;
 mod bounds_tree;
 mod color;
 /// The default colors used by GPUI.
@@ -24,6 +22,9 @@ mod element;
 mod elements;
 mod executor;
 mod platform_scheduler;
+mod postprocess;
+mod stream_image;
+mod stream_image_budget;
 pub(crate) use platform_scheduler::PlatformScheduler;
 mod geometry;
 mod gestures;
@@ -95,8 +96,6 @@ pub use app::*;
 pub(crate) use arena::*;
 pub use asset_cache::*;
 pub use assets::*;
-pub use stream_image::*;
-pub use stream_image_budget::*;
 pub use color::*;
 pub use ctor::ctor;
 pub use element::*;
@@ -108,6 +107,9 @@ pub use global::*;
 pub use gpui_macros::{
     AppContext, IntoElement, Render, VisualContext, bench, property_test, register_action, test,
 };
+pub use postprocess::*;
+pub use stream_image::*;
+pub use stream_image_budget::*;
 
 /// Defines a Criterion benchmark group for benchmarks annotated with [`gpui::bench`].
 ///

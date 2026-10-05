@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla,
+    PaintPostprocess, Pixels, Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
@@ -42,6 +42,8 @@ pub struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
+    order_offset: DrawOrder,
+    maximum_order: DrawOrder,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
     pub paths: Vec<Path<ScaledPixels>>,
@@ -50,6 +52,7 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    pub postprocesses: Vec<PaintPostprocess>,
 }
 
 #[expect(missing_docs)]
@@ -58,6 +61,8 @@ impl Scene {
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
+        self.order_offset = 0;
+        self.maximum_order = 0;
         self.paths.clear();
         self.shadows.clear();
         self.quads.clear();
@@ -66,6 +71,7 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.postprocesses.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -91,11 +97,13 @@ impl Scene {
             return;
         }
 
-        let order = self
+        let logical_order = self
             .layer_stack
             .last()
             .copied()
             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
+        let order = logical_order.saturating_add(self.order_offset);
+        self.maximum_order = self.maximum_order.max(order);
         match &mut primitive {
             Primitive::Shadow(shadow) => {
                 shadow.order = order;
@@ -130,6 +138,13 @@ impl Scene {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
             },
+            Primitive::Postprocess(effect) => {
+                // 后处理读取已画内容；跨层退出后的后续图元也必须留在它之后。
+                effect.order = self.maximum_order.saturating_add(1);
+                self.maximum_order = effect.order;
+                self.order_offset = effect.order.saturating_add(1);
+                self.postprocesses.push(effect.clone());
+            },
         }
         self.paint_operations.push(PaintOperation::Primitive(primitive));
     }
@@ -160,6 +175,7 @@ impl Scene {
         self.subpixel_sprites.sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.polychrome_sprites.sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.surfaces.sort_by_key(|surface| surface.order);
+        self.postprocesses.sort_by_key(|effect| effect.order);
     }
 
     #[cfg_attr(
@@ -187,6 +203,8 @@ impl Scene {
             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
+            postprocesses_start: 0,
+            postprocesses_iter: self.postprocesses.iter().peekable(),
         }
     }
 }
@@ -209,6 +227,7 @@ pub(crate) enum PrimitiveKind {
     SubpixelSprite,
     PolychromeSprite,
     Surface,
+    Postprocess,
 }
 
 pub(crate) enum PaintOperation {
@@ -229,6 +248,7 @@ pub enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
+    Postprocess(PaintPostprocess),
 }
 
 #[expect(missing_docs)]
@@ -243,6 +263,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
+            Primitive::Postprocess(effect) => &effect.bounds,
         }
     }
 
@@ -256,6 +277,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
+            Primitive::Postprocess(effect) => &effect.content_mask,
         }
     }
 }
@@ -284,6 +306,8 @@ struct BatchIterator<'a> {
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
+    postprocesses_start: usize,
+    postprocesses_iter: Peekable<slice::Iter<'a, PaintPostprocess>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -299,6 +323,7 @@ impl<'a> Iterator for BatchIterator<'a> {
             (self.subpixel_sprites_iter.peek().map(|s| s.order), PrimitiveKind::SubpixelSprite),
             (self.polychrome_sprites_iter.peek().map(|s| s.order), PrimitiveKind::PolychromeSprite),
             (self.surfaces_iter.peek().map(|s| s.order), PrimitiveKind::Surface),
+            (self.postprocesses_iter.peek().map(|s| s.order), PrimitiveKind::Postprocess),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
 
@@ -444,6 +469,12 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.surfaces_start = surfaces_end;
                 Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
             },
+            PrimitiveKind::Postprocess => {
+                let start = self.postprocesses_start;
+                self.postprocesses_iter.next();
+                self.postprocesses_start += 1;
+                Some(PrimitiveBatch::Postprocesses(start..self.postprocesses_start))
+            },
         }
     }
 }
@@ -476,6 +507,7 @@ pub enum PrimitiveBatch {
         range: Range<usize>,
     },
     Surfaces(Range<usize>),
+    Postprocesses(Range<usize>),
 }
 
 impl PrimitiveBatch {
@@ -496,6 +528,7 @@ impl PrimitiveBatch {
                 format!("polychrome sprites ({}) on atlas {}", range.len(), texture_id.index)
             },
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
+            Self::Postprocesses(range) => format!("postprocesses ({})", range.len()),
         }
     }
 }
@@ -894,5 +927,87 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+#[cfg(test)]
+mod postprocess_tests {
+    use super::*;
+    use crate::{
+        AtlasKey, BackgroundExecutor, DevicePixels, PlatformAtlas, PostprocessFeedback,
+        StreamImageBudget, StreamImageBudgets, StreamImageHandle, TestDispatcher, size,
+    };
+    use std::{borrow::Cow, sync::Arc};
+    struct DummyAtlas;
+    impl PlatformAtlas for DummyAtlas {
+        fn get_or_insert_with<'a>(
+            &self,
+            _: &AtlasKey,
+            _: &mut dyn FnMut() -> crate::Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
+        ) -> crate::Result<Option<AtlasTile>> {
+            anyhow::bail!("ordering fixture does not allocate")
+        }
+        fn remove(&self, _: &AtlasKey) {}
+    }
+    fn region(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
+        Bounds::new(
+            point(ScaledPixels(x), ScaledPixels(y)),
+            size(ScaledPixels(width), ScaledPixels(height)),
+        )
+    }
+    #[test]
+    fn effect_orders_survive_layer_exit_replay_and_clear() {
+        let owner = StreamImageHandle::new(
+            Arc::new(DummyAtlas),
+            BackgroundExecutor::new(Arc::new(TestDispatcher::new(0))),
+            StreamImageBudgets::new(StreamImageBudget::new(1), StreamImageBudget::new(1)),
+        );
+        ordering(&owner);
+    }
+    fn ordering(owner: &StreamImageHandle) {
+        let bounds = region(0.0, 0.0, 4.0, 4.0);
+        let quad = Quad { bounds, content_mask: ContentMask { bounds }, ..Default::default() };
+        let mut scene = Scene::default();
+        scene.push_layer(bounds);
+        scene.insert_primitive(quad);
+        scene.push_layer(bounds);
+        scene.insert_primitive(Primitive::Postprocess(PaintPostprocess {
+            order: 0,
+            bounds,
+            content_mask: ContentMask { bounds },
+            owner: owner.clone(),
+            uniforms: vec![0; 16].into(),
+            feedback: PostprocessFeedback::default(),
+        }));
+        scene.insert_primitive(quad);
+        scene.pop_layer();
+        scene.insert_primitive(quad);
+        scene.pop_layer();
+        scene.insert_primitive(quad);
+        scene.finish();
+        let barrier = scene.postprocesses[0].order;
+        assert!(scene.quads[0].order < barrier);
+        assert!(scene.quads[1..].iter().all(|quad| quad.order > barrier));
+        let batches: Vec<_> = scene
+            .batches()
+            .map(|batch| match batch {
+                PrimitiveBatch::Quads(_) => "quad",
+                PrimitiveBatch::Postprocesses(_) => "effect",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(batches, ["quad", "effect", "quad"]);
+        let mut replay = Scene::default();
+        replay.replay(0..scene.len(), &scene);
+        replay.finish();
+        assert_eq!(replay.postprocesses[0].order, barrier);
+        assert_eq!(
+            replay.quads.iter().map(|q| q.order).collect::<Vec<_>>(),
+            scene.quads.iter().map(|q| q.order).collect::<Vec<_>>()
+        );
+        replay.clear();
+        replay.insert_primitive(quad);
+        assert_eq!(replay.quads[0].order, 0);
+        println!("PASS scene ordering, layer exit, replay and reset");
     }
 }

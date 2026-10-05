@@ -1,8 +1,11 @@
 use collections::FxHashMap;
+#[path = "postprocess.rs"]
+mod postprocess;
 #[path = "stream_image.rs"]
 mod stream_image;
 use etagere::BucketedAtlasAllocator;
 use parking_lot::Mutex;
+use postprocess::NativePostprocess;
 use std::sync::Arc;
 use stream_image::{NativeStreamImage, STREAM_TEXTURE_BIT};
 use windows::Win32::Graphics::{
@@ -29,11 +32,17 @@ struct DirectXAtlasState {
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
     streams: FxHashMap<u64, NativeStreamImage>,
+    effects: FxHashMap<u64, NativePostprocess>,
     device_epoch: u64,
 }
 struct PreparedNativeBackground {
     image: NativeStreamImage,
     device_epoch: u64,
+}
+struct PreparedNativePostprocess {
+    effect: NativePostprocess,
+    device_epoch: u64,
+    cancellation: gpui::BackgroundShaderCancellation,
 }
 
 struct DirectXAtlasTexture {
@@ -56,6 +65,7 @@ impl DirectXAtlas {
                 subpixel_textures: Default::default(),
                 tiles_by_key: Default::default(),
                 streams: Default::default(),
+                effects: Default::default(),
                 device_epoch: 0,
             }),
             unsafe { GetCurrentThreadId() },
@@ -85,10 +95,12 @@ impl DirectXAtlas {
     ) -> anyhow::Result<()> {
         let mut lock = self.0.lock();
         anyhow::ensure!(
-            lock.streams.is_empty() || unsafe { lock.device.GetDeviceRemovedReason() }.is_err(),
+            (lock.streams.is_empty() && lock.effects.is_empty())
+                || unsafe { lock.device.GetDeviceRemovedReason() }.is_err(),
             "live stream resources require completion before a healthy device reset"
         );
         lock.streams.clear();
+        lock.effects.clear();
         lock.device_epoch = lock
             .device_epoch
             .checked_add(1)
@@ -101,6 +113,23 @@ impl DirectXAtlas {
         lock.subpixel_textures = AtlasTextureList::default();
         lock.tiles_by_key.clear();
         Ok(())
+    }
+
+    pub(crate) fn render_postprocess(
+        &self,
+        screen: &ID3D11Texture2D,
+        paint: &gpui::PaintPostprocess,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            unsafe { GetCurrentThreadId() } == self.1,
+            "effect draw must run on its UI thread"
+        );
+        let mut state = self.0.lock();
+        state
+            .effects
+            .get_mut(&paint.owner.id().value())
+            .ok_or_else(|| anyhow::anyhow!("surface effect is not prepared"))?
+            .render(screen, paint)
     }
 
     pub(crate) fn finish_stream_frame(&self, scene: &gpui::Scene) -> anyhow::Result<()> {
@@ -128,7 +157,7 @@ impl PlatformAtlas for DirectXAtlas {
     fn invalidate_background_preparations_for_test(&self) -> anyhow::Result<()> {
         let mut lock = self.0.lock();
         anyhow::ensure!(
-            lock.streams.is_empty(),
+            lock.streams.is_empty() && lock.effects.is_empty(),
             "epoch fault injection requires no published streams"
         );
         lock.device_epoch = lock
@@ -163,8 +192,74 @@ impl PlatformAtlas for DirectXAtlas {
         &self,
         id: gpui::StreamImageId,
     ) -> anyhow::Result<Option<gpui::StreamImageCompletion>> {
-        let stream = self.0.lock().streams.remove(&id.value());
+        let mut state = self.0.lock();
+        if let Some(effect) = state.effects.remove(&id.value()) {
+            return effect.retire().map(Some);
+        }
+        let stream = state.streams.remove(&id.value());
         stream.map(NativeStreamImage::retire).transpose()
+    }
+    fn postprocess_factory(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        descriptor: gpui::PostprocessDescriptor,
+        cancellation: gpui::BackgroundShaderCancellation,
+    ) -> anyhow::Result<Box<dyn FnOnce() -> anyhow::Result<Option<gpui::PreparedStreamImage>> + Send>>
+    {
+        let state = self.0.lock();
+        anyhow::ensure!(
+            !state.streams.contains_key(&id.value()) && !state.effects.contains_key(&id.value()),
+            "effect source owner is already occupied"
+        );
+        let device = state.device.clone();
+        let context = state.device_context.clone();
+        let epoch = state.device_epoch;
+        let thread = self.1;
+        let budgets = budgets.clone();
+        Ok(Box::new(move || {
+            anyhow::ensure!(
+                unsafe { GetCurrentThreadId() } != thread,
+                "effect factory ran on its UI thread"
+            );
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            let effect = NativePostprocess::new(&device, &context, id, &budgets, descriptor)?;
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            budgets.ensure_available()?;
+            Ok(Some(gpui::PreparedStreamImage::new(
+                id,
+                PreparedNativePostprocess { effect, device_epoch: epoch, cancellation },
+            )))
+        }))
+    }
+    fn adopt_postprocess(
+        &self,
+        id: gpui::StreamImageId,
+        prepared: gpui::PreparedStreamImage,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            unsafe { GetCurrentThreadId() } == self.1,
+            "effect adoption must run on its UI thread"
+        );
+        let prepared = prepared.into_native::<PreparedNativePostprocess>(id)?;
+        anyhow::ensure!(!prepared.cancellation.is_cancelled(), "effect preparation was cancelled");
+        let mut state = self.0.lock();
+        unsafe { state.device.GetDeviceRemovedReason() }?;
+        anyhow::ensure!(
+            prepared.device_epoch == state.device_epoch
+                && prepared.effect.belongs_to_device(&state.device),
+            "effect preparation belongs to an obsolete device"
+        );
+        anyhow::ensure!(
+            !state.streams.contains_key(&id.value()) && !state.effects.contains_key(&id.value()),
+            "effect source owner is already occupied"
+        );
+        state.effects.insert(id.value(), prepared.effect);
+        Ok(())
     }
     fn stage_background_shader(
         &self,

@@ -1514,6 +1514,13 @@ impl WgpuRenderer {
                     // Surfaces are macOS-only for video playback and are not
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {},
+                    PrimitiveBatch::Postprocesses(range) => {
+                        for effect in &scene.postprocesses[range] {
+                            effect.feedback.record_error(
+                                "surface post-processing is not available on this backend".into(),
+                            );
+                        }
+                    },
                 }
             }
         }

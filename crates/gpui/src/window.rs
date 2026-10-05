@@ -4518,6 +4518,33 @@ impl Window {
         Ok(update)
     }
 
+    /// Applies a prepared surface effect after already painted content, without CPU readback.
+    pub fn paint_postprocess(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        owner: &crate::StreamImageHandle,
+        uniforms: Arc<[u8]>,
+        feedback: crate::PostprocessFeedback,
+    ) -> Result<()> {
+        self.invalidator.debug_assert_paint();
+        anyhow::ensure!(owner.belongs_to(&self.sprite_atlas), "effect belongs to another window");
+        anyhow::ensure!(
+            (16..=16 * 1024).contains(&uniforms.len()) && uniforms.len() % 16 == 0,
+            "invalid effect uniform data"
+        );
+        self.next_frame.scene.insert_primitive(crate::Primitive::Postprocess(
+            crate::PaintPostprocess {
+                order: 0,
+                bounds: self.snap_bounds(bounds),
+                content_mask: self.snapped_content_mask(),
+                owner: owner.clone(),
+                uniforms,
+                feedback,
+            },
+        ));
+        Ok(())
+    }
+
     fn paint_image_tile(
         &mut self,
         bounds: Bounds<Pixels>,

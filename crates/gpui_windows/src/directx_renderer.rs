@@ -376,6 +376,17 @@ impl DirectXRenderer {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+                PrimitiveBatch::Postprocesses(range) => {
+                    let target = self.resources.as_ref()
+                        .and_then(|resources| resources.render_target.as_ref())
+                        .context("missing effect input render target")?;
+                    for effect in &scene.postprocesses[range] {
+                        if let Err(error) = self.atlas.render_postprocess(target, effect) {
+                            effect.feedback.record_error(error.to_string());
+                        }
+                    }
+                    Ok(())
+                },
             }
             .with_context(|| {
                 format!(

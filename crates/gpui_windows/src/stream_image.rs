@@ -16,7 +16,7 @@ use windows::{
     core::Interface,
 };
 #[path = "background_shader.rs"]
-mod background_shader;
+pub(super) mod background_shader;
 use background_shader::NativeBackgroundShader;
 
 pub(super) const STREAM_TEXTURE_BIT: u32 = 0x8000_0000;
@@ -46,6 +46,7 @@ pub(super) struct NativeStreamImage {
     sequence: u64,
     uploaded: bool,
     shader: Option<NativeBackgroundShader>,
+    retained: Option<Box<dyn Send>>,
     // Last field releases admission only after native owners have been dropped.
     _lease: StreamImageLease,
 }
@@ -89,7 +90,7 @@ impl NativeStreamImage {
         budgets: &StreamImageBudgets,
         size: Size<DevicePixels>,
     ) -> anyhow::Result<Self> {
-        Self::allocate(device, context, id, budgets, size, false)
+        Self::allocate(device, context, id, budgets, size, false, 0)
     }
     pub fn new_shader(
         device: &ID3D11Device,
@@ -98,7 +99,16 @@ impl NativeStreamImage {
         budgets: &StreamImageBudgets,
         size: Size<DevicePixels>,
     ) -> anyhow::Result<Self> {
-        Self::allocate(device, context, id, budgets, size, true)
+        Self::allocate(device, context, id, budgets, size, true, 16)
+    }
+    pub fn new_effect_input(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        id: StreamImageId,
+        budgets: &StreamImageBudgets,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<Self> {
+        Self::allocate(device, context, id, budgets, size, true, 0)
     }
     fn allocate(
         device: &ID3D11Device,
@@ -107,6 +117,7 @@ impl NativeStreamImage {
         budgets: &StreamImageBudgets,
         size: Size<DevicePixels>,
         shader_only: bool,
+        uniform_bytes: u64,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             id.value() < u64::from(STREAM_TEXTURE_BIT),
@@ -122,7 +133,7 @@ impl NativeStreamImage {
         let staging_pitch = if shader_only { 0 } else { row.div_ceil(256) * 256 };
         let admitted = (row + staging_pitch)
             .checked_mul(u64::from(height))
-            .and_then(|bytes| bytes.checked_add(if shader_only { 16 } else { 0 }))
+            .and_then(|bytes| bytes.checked_add(uniform_bytes))
             .ok_or_else(|| anyhow::anyhow!("stream allocation overflow"))?;
         let lease = budgets.reserve(admitted)?;
         let description = D3D11_TEXTURE2D_DESC {
@@ -173,6 +184,7 @@ impl NativeStreamImage {
             sequence: 0,
             uploaded: false,
             shader: None,
+            retained: None,
             _lease: lease,
         })
     }
@@ -203,6 +215,22 @@ impl NativeStreamImage {
     }
     pub fn view(&self) -> [Option<ID3D11ShaderResourceView>; 1] {
         self.view.clone()
+    }
+    pub fn texture(&self) -> &ID3D11Texture2D {
+        &self.texture
+    }
+    pub fn ready_for_effect(&self) -> anyhow::Result<bool> {
+        self._lease.budgets().ensure_available()?;
+        unsafe { self.device.GetDeviceRemovedReason() }?;
+        let ready = unsafe { self.fence.GetCompletedValue() } >= self.fence_value;
+        if !ready {
+            unsafe { self.context.Flush() };
+        }
+        Ok(ready)
+    }
+    pub fn retain_for_retirement(&mut self, resources: impl Send + 'static) {
+        // 多段效果与输入纹理共用一次 fence 确认和隔离；不会提前释放其余纹理/许可证。
+        self.retained = Some(Box::new(resources));
     }
     pub fn signal(&mut self) -> anyhow::Result<()> {
         self.fence_value = self
