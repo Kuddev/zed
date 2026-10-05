@@ -75,8 +75,7 @@ impl Scene {
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
         let order = self.primitive_bounds.insert(bounds);
         self.layer_stack.push(order);
-        self.paint_operations
-            .push(PaintOperation::StartLayer(bounds));
+        self.paint_operations.push(PaintOperation::StartLayer(bounds));
     }
 
     pub fn pop_layer(&mut self) {
@@ -86,9 +85,7 @@ impl Scene {
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
-        let clipped_bounds = primitive
-            .bounds()
-            .intersect(&primitive.content_mask().bounds);
+        let clipped_bounds = primitive.bounds().intersect(&primitive.content_mask().bounds);
 
         if clipped_bounds.is_empty() {
             return;
@@ -103,39 +100,38 @@ impl Scene {
             Primitive::Shadow(shadow) => {
                 shadow.order = order;
                 self.shadows.push(*shadow);
-            }
+            },
             Primitive::Quad(quad) => {
                 quad.order = order;
                 self.quads.push(*quad);
-            }
+            },
             Primitive::Path(path) => {
                 path.order = order;
                 path.id = PathId(self.paths.len());
                 self.paths.push(path.clone());
-            }
+            },
             Primitive::Underline(underline) => {
                 underline.order = order;
                 self.underlines.push(*underline);
-            }
+            },
             Primitive::MonochromeSprite(sprite) => {
                 sprite.order = order;
                 self.monochrome_sprites.push(*sprite);
-            }
+            },
             Primitive::SubpixelSprite(sprite) => {
                 sprite.order = order;
                 self.subpixel_sprites.push(*sprite);
-            }
+            },
             Primitive::PolychromeSprite(sprite) => {
                 sprite.order = order;
                 self.polychrome_sprites.push(*sprite);
-            }
+            },
             Primitive::Surface(surface) => {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
-            }
+            },
         }
-        self.paint_operations
-            .push(PaintOperation::Primitive(primitive));
+        self.paint_operations.push(PaintOperation::Primitive(primitive));
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
@@ -144,8 +140,15 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::StreamImageOwner(owner) => self.hold_stream_image(owner.clone()),
             }
         }
+    }
+
+    /// Retains a native image owner through scene caching and replay. Native
+    /// platform hosts call this for every directly inserted stream sprite.
+    pub fn hold_stream_image(&mut self, owner: crate::StreamImageHandle) {
+        self.paint_operations.push(PaintOperation::StreamImageOwner(owner));
     }
 
     pub fn finish(&mut self) {
@@ -153,12 +156,9 @@ impl Scene {
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
         self.underlines.sort_by_key(|underline| underline.order);
-        self.monochrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.subpixel_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.polychrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+        self.monochrome_sprites.sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+        self.subpixel_sprites.sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+        self.polychrome_sprites.sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.surfaces.sort_by_key(|surface| surface.order);
     }
 
@@ -212,6 +212,7 @@ pub(crate) enum PrimitiveKind {
 }
 
 pub(crate) enum PaintOperation {
+    StreamImageOwner(crate::StreamImageHandle),
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
@@ -290,32 +291,14 @@ impl<'a> Iterator for BatchIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut orders_and_kinds = [
-            (
-                self.shadows_iter.peek().map(|s| s.order),
-                PrimitiveKind::Shadow,
-            ),
+            (self.shadows_iter.peek().map(|s| s.order), PrimitiveKind::Shadow),
             (self.quads_iter.peek().map(|q| q.order), PrimitiveKind::Quad),
             (self.paths_iter.peek().map(|q| q.order), PrimitiveKind::Path),
-            (
-                self.underlines_iter.peek().map(|u| u.order),
-                PrimitiveKind::Underline,
-            ),
-            (
-                self.monochrome_sprites_iter.peek().map(|s| s.order),
-                PrimitiveKind::MonochromeSprite,
-            ),
-            (
-                self.subpixel_sprites_iter.peek().map(|s| s.order),
-                PrimitiveKind::SubpixelSprite,
-            ),
-            (
-                self.polychrome_sprites_iter.peek().map(|s| s.order),
-                PrimitiveKind::PolychromeSprite,
-            ),
-            (
-                self.surfaces_iter.peek().map(|s| s.order),
-                PrimitiveKind::Surface,
-            ),
+            (self.underlines_iter.peek().map(|u| u.order), PrimitiveKind::Underline),
+            (self.monochrome_sprites_iter.peek().map(|s| s.order), PrimitiveKind::MonochromeSprite),
+            (self.subpixel_sprites_iter.peek().map(|s| s.order), PrimitiveKind::SubpixelSprite),
+            (self.polychrome_sprites_iter.peek().map(|s| s.order), PrimitiveKind::PolychromeSprite),
+            (self.surfaces_iter.peek().map(|s| s.order), PrimitiveKind::Surface),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
 
@@ -341,7 +324,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                 }
                 self.shadows_start = shadows_end;
                 Some(PrimitiveBatch::Shadows(shadows_start..shadows_end))
-            }
+            },
             PrimitiveKind::Quad => {
                 let quads_start = self.quads_start;
                 let mut quads_end = quads_start + 1;
@@ -355,7 +338,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                 }
                 self.quads_start = quads_end;
                 Some(PrimitiveBatch::Quads(quads_start..quads_end))
-            }
+            },
             PrimitiveKind::Path => {
                 let paths_start = self.paths_start;
                 let mut paths_end = paths_start + 1;
@@ -369,7 +352,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                 }
                 self.paths_start = paths_end;
                 Some(PrimitiveBatch::Paths(paths_start..paths_end))
-            }
+            },
             PrimitiveKind::Underline => {
                 let underlines_start = self.underlines_start;
                 let mut underlines_end = underlines_start + 1;
@@ -383,7 +366,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                 }
                 self.underlines_start = underlines_end;
                 Some(PrimitiveBatch::Underlines(underlines_start..underlines_end))
-            }
+            },
             PrimitiveKind::MonochromeSprite => {
                 let texture_id = self.monochrome_sprites_iter.peek().unwrap().tile.texture_id;
                 let sprites_start = self.monochrome_sprites_start;
@@ -404,7 +387,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                     texture_id,
                     range: sprites_start..sprites_end,
                 })
-            }
+            },
             PrimitiveKind::SubpixelSprite => {
                 let texture_id = self.subpixel_sprites_iter.peek().unwrap().tile.texture_id;
                 let sprites_start = self.subpixel_sprites_start;
@@ -425,7 +408,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                     texture_id,
                     range: sprites_start..sprites_end,
                 })
-            }
+            },
             PrimitiveKind::PolychromeSprite => {
                 let texture_id = self.polychrome_sprites_iter.peek().unwrap().tile.texture_id;
                 let sprites_start = self.polychrome_sprites_start;
@@ -446,7 +429,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                     texture_id,
                     range: sprites_start..sprites_end,
                 })
-            }
+            },
             PrimitiveKind::Surface => {
                 let surfaces_start = self.surfaces_start;
                 let mut surfaces_end = surfaces_start + 1;
@@ -460,7 +443,7 @@ impl<'a> Iterator for BatchIterator<'a> {
                 }
                 self.surfaces_start = surfaces_end;
                 Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
-            }
+            },
         }
     }
 }
@@ -504,26 +487,14 @@ impl PrimitiveBatch {
             Self::Paths(range) => format!("paths ({})", range.len()),
             Self::Underlines(range) => format!("underlines ({})", range.len()),
             Self::MonochromeSprites { texture_id, range } => {
-                format!(
-                    "monochrome sprites ({}) on atlas {}",
-                    range.len(),
-                    texture_id.index
-                )
-            }
+                format!("monochrome sprites ({}) on atlas {}", range.len(), texture_id.index)
+            },
             Self::SubpixelSprites { texture_id, range } => {
-                format!(
-                    "subpixel sprites ({}) on atlas {}",
-                    range.len(),
-                    texture_id.index
-                )
-            }
+                format!("subpixel sprites ({}) on atlas {}", range.len(), texture_id.index)
+            },
             Self::PolychromeSprites { texture_id, range } => {
-                format!(
-                    "polychrome sprites ({}) on atlas {}",
-                    range.len(),
-                    texture_id.index
-                )
-            }
+                format!("polychrome sprites ({}) on atlas {}", range.len(), texture_id.index)
+            },
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
         }
     }
@@ -618,10 +589,7 @@ impl Eq for TransformationMatrix {}
 impl TransformationMatrix {
     /// The unit matrix, has no effect.
     pub fn unit() -> Self {
-        Self {
-            rotation_scale: [[1.0, 0.0], [0.0, 1.0]],
-            translation: [0.0, 0.0],
-        }
+        Self { rotation_scale: [[1.0, 0.0], [0.0, 1.0]], translation: [0.0, 0.0] }
     }
 
     /// Move the origin by a given point
@@ -635,10 +603,7 @@ impl TransformationMatrix {
     /// Clockwise rotation in radians around the origin
     pub fn rotate(self, angle: Radians) -> Self {
         self.compose(Self {
-            rotation_scale: [
-                [angle.0.cos(), -angle.0.sin()],
-                [angle.0.sin(), angle.0.cos()],
-            ],
+            rotation_scale: [[angle.0.cos(), -angle.0.sin()], [angle.0.sin(), angle.0.cos()]],
             translation: [0.0, 0.0],
         })
     }
@@ -807,10 +772,7 @@ impl Path<Pixels> {
             vertices: Vec::new(),
             start,
             current: start,
-            bounds: Bounds {
-                origin: start,
-                size: Default::default(),
-            },
+            bounds: Bounds { origin: start, size: Default::default() },
             content_mask: Default::default(),
             color: Default::default(),
             contour_count: 0,
@@ -824,11 +786,7 @@ impl Path<Pixels> {
             order: self.order,
             bounds: self.bounds.scale(factor),
             content_mask: self.content_mask.scale(factor),
-            vertices: self
-                .vertices
-                .iter()
-                .map(|vertex| vertex.scale(factor))
-                .collect(),
+            vertices: self.vertices.iter().map(|vertex| vertex.scale(factor)).collect(),
             start: self.start.map(|start| start.scale(factor)),
             current: self.current.scale(factor),
             contour_count: self.contour_count,
@@ -880,18 +838,9 @@ impl Path<Pixels> {
     ) {
         self.bounds = self
             .bounds
-            .union(&Bounds {
-                origin: xy.0,
-                size: Default::default(),
-            })
-            .union(&Bounds {
-                origin: xy.1,
-                size: Default::default(),
-            })
-            .union(&Bounds {
-                origin: xy.2,
-                size: Default::default(),
-            });
+            .union(&Bounds { origin: xy.0, size: Default::default() })
+            .union(&Bounds { origin: xy.1, size: Default::default() })
+            .union(&Bounds { origin: xy.2, size: Default::default() });
 
         self.vertices.push(PathVertex {
             xy_position: xy.0,

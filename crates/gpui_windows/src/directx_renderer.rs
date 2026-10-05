@@ -48,6 +48,7 @@ pub(crate) struct DirectXRenderer {
 
     width: u32,
     height: u32,
+    pending_size: Option<Size<DevicePixels>>,
 
     /// Whether we want to skip drwaing due to device lost events.
     ///
@@ -126,12 +127,7 @@ impl DirectXRendererDevices {
         directx_devices: &DirectXDevices,
         disable_direct_composition: bool,
     ) -> Result<Self> {
-        let DirectXDevices {
-            adapter,
-            dxgi_factory,
-            device,
-            device_context,
-        } = directx_devices;
+        let DirectXDevices { adapter, dxgi_factory, device, device_context } = directx_devices;
         let dxgi_device = if disable_direct_composition {
             None
         } else {
@@ -193,6 +189,7 @@ impl DirectXRenderer {
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
+            pending_size: None,
             skip_draws: false,
         })
     }
@@ -203,11 +200,7 @@ impl DirectXRenderer {
 
     fn pre_draw(&self, clear_color: &[f32; 4]) -> Result<()> {
         let resources = self.resources.as_ref().expect("resources missing");
-        let device_context = &self
-            .devices
-            .as_ref()
-            .expect("devices missing")
-            .device_context;
+        let device_context = &self.devices.as_ref().expect("devices missing").device_context;
         update_buffer(
             device_context,
             self.globals.global_params_buffer.as_ref().unwrap(),
@@ -222,10 +215,7 @@ impl DirectXRenderer {
         )?;
         unsafe {
             device_context.ClearRenderTargetView(
-                resources
-                    .render_target_view
-                    .as_ref()
-                    .context("missing render target view")?,
+                resources.render_target_view.as_ref().context("missing render target view")?,
                 clear_color,
             );
             device_context
@@ -310,8 +300,7 @@ impl DirectXRenderer {
             Some(composition)
         };
 
-        self.atlas
-            .handle_device_lost(&devices.device, &devices.device_context);
+        self.atlas.handle_device_lost(&devices.device, &devices.device_context)?;
 
         unsafe {
             devices
@@ -332,10 +321,25 @@ impl DirectXRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
+        let drawn = self.draw_scene(scene, background_appearance);
+        // Fence partial submissions as well as successful frames.
+        let finished = self.atlas.finish_stream_frame(scene);
+        drawn.and(finished)
+    }
+
+    fn draw_scene(
+        &mut self,
+        scene: &Scene,
+        background_appearance: WindowBackgroundAppearance,
+    ) -> Result<()> {
         if self.skip_draws {
             // skip drawing this frame, we just recovered from a device lost event
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
+        }
+        if let Some(size) = self.pending_size {
+            self.resize_resources(size)?;
+            self.pending_size = None;
         }
         self.pre_draw(&match background_appearance {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
@@ -392,13 +396,19 @@ impl DirectXRenderer {
     }
 
     pub(crate) fn resize(&mut self, new_size: Size<DevicePixels>) -> Result<()> {
+        // Geometry can change repeatedly while a hidden window produces no frames.
+        // Keep only its wanted dimensions; native swapchain/MSAA allocation waits
+        // until a real draw and receives only the most recent requested size.
+        self.pending_size = Some(new_size);
+        Ok(())
+    }
+
+    fn resize_resources(&mut self, new_size: Size<DevicePixels>) -> Result<()> {
         let width = new_size.width.0.max(1) as u32;
         let height = new_size.height.0.max(1) as u32;
         if self.width == width && self.height == height {
             return Ok(());
         }
-        self.width = width;
-        self.height = height;
 
         // Clear the render target before resizing
         let devices = self.devices.as_ref().context("devices missing")?;
@@ -431,6 +441,8 @@ impl DirectXRenderer {
                 .device_context
                 .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
         }
+        self.width = width;
+        self.height = height;
 
         Ok(())
     }
@@ -496,10 +508,7 @@ impl DirectXRenderer {
         let devices = self.devices.as_ref().context("devices missing")?;
         self.pipelines.shadow_pipeline.draw_range(
             &devices.device_context,
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
+            self.globals.batch_params_buffer.as_ref().context("batch params buffer missing")?,
             start as u32,
             len as u32,
         )
@@ -512,10 +521,7 @@ impl DirectXRenderer {
         let devices = self.devices.as_ref().context("devices missing")?;
         self.pipelines.quad_pipeline.draw_range(
             &devices.device_context,
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
+            self.globals.batch_params_buffer.as_ref().context("batch params buffer missing")?,
             start as u32,
             len as u32,
         )
@@ -599,9 +605,7 @@ impl DirectXRenderer {
         let sprites = if paths.last().unwrap().order == first_path.order {
             paths
                 .iter()
-                .map(|path| PathSprite {
-                    bounds: path.clipped_bounds(),
-                })
+                .map(|path| PathSprite { bounds: path.clipped_bounds() })
                 .collect::<Vec<_>>()
         } else {
             let mut bounds = first_path.clipped_bounds();
@@ -635,10 +639,7 @@ impl DirectXRenderer {
         let devices = self.devices.as_ref().context("devices missing")?;
         self.pipelines.underline_pipeline.draw_range(
             &devices.device_context,
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
+            self.globals.batch_params_buffer.as_ref().context("batch params buffer missing")?,
             start as u32,
             len as u32,
         )
@@ -658,10 +659,7 @@ impl DirectXRenderer {
         self.pipelines.mono_sprites.draw_range_with_texture(
             &devices.device_context,
             &texture_view,
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
+            self.globals.batch_params_buffer.as_ref().context("batch params buffer missing")?,
             slice::from_ref(&self.globals.sampler),
             start as u32,
             len as u32,
@@ -682,10 +680,7 @@ impl DirectXRenderer {
         self.pipelines.subpixel_sprites.draw_range_with_texture(
             &devices.device_context,
             &texture_view,
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
+            self.globals.batch_params_buffer.as_ref().context("batch params buffer missing")?,
             slice::from_ref(&self.globals.sampler),
             start as u32,
             len as u32,
@@ -706,10 +701,7 @@ impl DirectXRenderer {
         self.pipelines.poly_sprites.draw_range_with_texture(
             &devices.device_context,
             &texture_view,
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
+            self.globals.batch_params_buffer.as_ref().context("batch params buffer missing")?,
             slice::from_ref(&self.globals.sampler),
             start as u32,
             len as u32,
@@ -727,9 +719,8 @@ impl DirectXRenderer {
         let devices = self.devices.as_ref().context("devices missing")?;
         let desc = unsafe { devices.adapter.GetDesc1() }?;
         let is_software_emulated = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0;
-        let device_name = String::from_utf16_lossy(&desc.Description)
-            .trim_matches(char::from(0))
-            .to_string();
+        let device_name =
+            String::from_utf16_lossy(&desc.Description).trim_matches(char::from(0)).to_string();
         let driver_name = match desc.VendorId {
             0x10DE => "NVIDIA Corporation".to_string(),
             0x1002 => "AMD Corporation".to_string(),
@@ -745,12 +736,7 @@ impl DirectXRenderer {
         .context("Failed to get gpu driver info")
         .log_err()
         .unwrap_or("Unknown Driver".to_string());
-        Ok(GpuSpecs {
-            is_software_emulated,
-            device_name,
-            driver_name,
-            driver_info: driver_version,
-        })
+        Ok(GpuSpecs { is_software_emulated, device_name, driver_name, driver_info: driver_version })
     }
 
     pub(crate) fn get_font_info() -> &'static FontInfo {
@@ -920,11 +906,7 @@ impl DirectComposition {
         let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, true) }?;
         let comp_visual = unsafe { comp_device.CreateVisual() }?;
 
-        Ok(Self {
-            comp_device,
-            comp_target,
-            comp_visual,
-        })
+        Ok(Self { comp_device, comp_target, comp_visual })
     }
 
     pub fn set_swap_chain(&self, swap_chain: &IDXGISwapChain1) -> Result<()> {
@@ -960,11 +942,7 @@ impl DirectXGlobalElements {
             output
         };
 
-        Ok(Self {
-            global_params_buffer,
-            batch_params_buffer,
-            sampler,
-        })
+        Ok(Self { global_params_buffer, batch_params_buffer, sampler })
     }
 }
 
@@ -1044,10 +1022,8 @@ impl<T> PipelineState<T> {
                 "{} buffer needs {required_size} bytes, above the maximum of {MAX_INSTANCE_BUFFER_SIZE}",
                 self.label
             );
-            let new_buffer_size = data
-                .len()
-                .next_power_of_two()
-                .min(MAX_INSTANCE_BUFFER_SIZE / element_size);
+            let new_buffer_size =
+                data.len().next_power_of_two().min(MAX_INSTANCE_BUFFER_SIZE / element_size);
             log::debug!(
                 "Updating {} buffer size from {} to {}",
                 self.label,
@@ -1209,10 +1185,7 @@ fn create_swap_chain_for_composition(
         Height: height,
         Format: RENDER_TARGET_FORMAT,
         Stereo: false.into(),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
         BufferCount: BUFFER_COUNT as u32,
         // Composition SwapChains only support the DXGI_SCALING_STRETCH Scaling.
@@ -1238,10 +1211,7 @@ fn create_swap_chain(
         Height: height,
         Format: RENDER_TARGET_FORMAT,
         Stereo: false.into(),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
         BufferCount: BUFFER_COUNT as u32,
         Scaling: DXGI_SCALING_NONE,
@@ -1320,10 +1290,7 @@ fn create_path_intermediate_texture(
             MipLevels: 1,
             ArraySize: 1,
             Format: RENDER_TARGET_FORMAT,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
             CPUAccessFlags: 0,
@@ -1560,10 +1527,7 @@ fn update_batch_start(
     update_buffer(
         device_context,
         buffer,
-        &[BatchParams {
-            start_index: first_instance,
-            _padding: [0; 3],
-        }],
+        &[BatchParams { start_index: first_instance, _padding: [0; 3] }],
     )
 }
 
@@ -1841,20 +1805,12 @@ mod nvidia {
             );
 
             if result != 0 {
-                anyhow::bail!(
-                    "Failed to get NVIDIA driver version, error code: {}",
-                    result
-                );
+                anyhow::bail!("Failed to get NVIDIA driver version, error code: {}", result);
             }
             let major = driver_version / 100;
             let minor = driver_version % 100;
             let branch_string = CStr::from_ptr(build_branch_string.as_ptr());
-            Ok(format!(
-                "{}.{} {}",
-                major,
-                minor,
-                branch_string.to_string_lossy()
-            ))
+            Ok(format!("{}.{} {}", major, minor, branch_string.to_string_lossy()))
         })
     }
 }
@@ -1921,12 +1877,8 @@ mod amd {
                 devices: std::ptr::null_mut(),
             };
 
-            let result = ags_initialize(
-                AGS_CURRENT_VERSION,
-                std::ptr::null(),
-                &mut context,
-                &mut gpu_info,
-            );
+            let result =
+                ags_initialize(AGS_CURRENT_VERSION, std::ptr::null(), &mut context, &mut gpu_info);
             if result != 0 {
                 anyhow::bail!("Failed to initialize AMD AGS, error code: {}", result);
             }
@@ -1941,9 +1893,7 @@ mod amd {
             };
 
             let driver_version = if !gpu_info.driver_version.is_null() {
-                std::ffi::CStr::from_ptr(gpu_info.driver_version)
-                    .to_string_lossy()
-                    .into_owned()
+                std::ffi::CStr::from_ptr(gpu_info.driver_version).to_string_lossy().into_owned()
             } else {
                 "Unknown Radeon Driver Version".to_string()
             };

@@ -127,16 +127,11 @@ impl WindowsWindowState {
         };
         let origin = logical_point(window_params.x as f32, window_params.y as f32, scale_factor);
         let logical_size = {
-            let physical_size = size(
-                DevicePixels(window_params.cx),
-                DevicePixels(window_params.cy),
-            );
+            let physical_size =
+                size(DevicePixels(window_params.cx), DevicePixels(window_params.cy));
             physical_size.to_pixels(scale_factor)
         };
-        let fullscreen_restore_bounds = Bounds {
-            origin,
-            size: logical_size,
-        };
+        let fullscreen_restore_bounds = Bounds { origin, size: logical_size };
         let border_offset = WindowBorderOffset::default();
         let restore_from_minimized = None;
         let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
@@ -199,10 +194,7 @@ impl WindowsWindowState {
     }
 
     fn bounds(&self) -> Bounds<Pixels> {
-        Bounds {
-            origin: self.origin.get(),
-            size: self.logical_size.get(),
-        }
+        Bounds { origin: self.origin.get(), size: self.logical_size.get() }
     }
 
     // Calculate the bounds used for saving and whether the window is maximized.
@@ -286,13 +278,7 @@ impl WindowsWindowInner {
         let this = self.clone();
         self.executor
             .spawn(async move {
-                let StyleAndBounds {
-                    style,
-                    x,
-                    y,
-                    cx,
-                    cy,
-                } = match this.state.fullscreen.take() {
+                let StyleAndBounds { style, x, y, cx, cy } = match this.state.fullscreen.take() {
                     Some(state) => state,
                     None => {
                         let (window_bounds, _) = this.state.calculate_window_bounds();
@@ -325,7 +311,7 @@ impl WindowsWindowInner {
                             cx: physical_bounds.size.width.0,
                             cy: physical_bounds.size.height.0,
                         }
-                    }
+                    },
                 };
                 set_non_rude_hwnd(this.hwnd, !this.state.is_fullscreen());
                 unsafe { set_window_long(this.hwnd, GWL_STYLE, style.0 as isize) };
@@ -361,7 +347,7 @@ impl WindowsWindowInner {
                         .context("failed to set window placement")?
                 };
                 self.toggle_fullscreen();
-            }
+            },
             WindowOpenState::Windowed => unsafe {
                 SetWindowPlacement(self.hwnd, &open_status.placement)
                     .context("failed to set window placement")?;
@@ -454,11 +440,8 @@ impl WindowsWindow {
         } else {
             None
         };
-        let hide_title_bar = params
-            .titlebar
-            .as_ref()
-            .map(|titlebar| titlebar.appears_transparent)
-            .unwrap_or(true);
+        let hide_title_bar =
+            params.titlebar.as_ref().map(|titlebar| titlebar.appears_transparent).unwrap_or(true);
         let window_name = HSTRING::from(
             params
                 .titlebar
@@ -566,10 +549,9 @@ impl WindowsWindow {
             }
             unsafe { SetWindowPlacement(hwnd, &placement)? };
         } else {
-            this.state.initial_placement.set(Some(WindowOpenStatus {
-                placement,
-                state: WindowOpenState::Windowed,
-            }));
+            this.state
+                .initial_placement
+                .set(Some(WindowOpenStatus { placement, state: WindowOpenState::Windowed }));
         }
 
         Ok(Self(this))
@@ -671,9 +653,7 @@ impl PlatformWindow for WindowsWindow {
         let scale_factor = self.scale_factor();
         let point = unsafe {
             let mut point: POINT = std::mem::zeroed();
-            GetCursorPos(&mut point)
-                .context("unable to get cursor position")
-                .log_err();
+            GetCursorPos(&mut point).context("unable to get cursor position").log_err();
             ScreenToClient(self.0.hwnd, &mut point).ok().log_err();
             point
         };
@@ -721,15 +701,15 @@ impl PlatformWindow for WindowsWindow {
                         PromptLevel::Info => {
                             title = windows::core::w!("Info");
                             main_icon = TD_INFORMATION_ICON;
-                        }
+                        },
                         PromptLevel::Warning => {
                             title = windows::core::w!("Warning");
                             main_icon = TD_WARNING_ICON;
-                        }
+                        },
                         PromptLevel::Critical => {
                             title = windows::core::w!("Critical");
                             main_icon = TD_ERROR_ICON;
-                        }
+                        },
                     };
                     config.pszWindowTitle = title;
                     config.Anonymous1.pszMainIcon = main_icon;
@@ -886,21 +866,21 @@ impl PlatformWindow for WindowsWindow {
         match background_appearance {
             WindowBackgroundAppearance::Opaque => {
                 set_window_composition_attribute(hwnd, None, 0);
-            }
+            },
             WindowBackgroundAppearance::Transparent => {
                 set_window_composition_attribute(hwnd, None, 2);
-            }
+            },
             WindowBackgroundAppearance::Blurred => {
                 set_window_composition_attribute(hwnd, Some((0, 0, 0, 0)), 4);
-            }
+            },
             WindowBackgroundAppearance::MicaBackdrop => {
                 // DWMSBT_MAINWINDOW => MicaBase
                 dwm_set_window_composition_attribute(hwnd, 2);
-            }
+            },
             WindowBackgroundAppearance::MicaAltBackdrop => {
                 // DWMSBT_TABBEDWINDOW => MicaAlt
                 dwm_set_window_composition_attribute(hwnd, 4);
-            }
+            },
         }
     }
 
@@ -941,19 +921,11 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
-        self.0
-            .state
-            .callbacks
-            .active_status_change
-            .set(Some(callback));
+        self.0.state.callbacks.active_status_change.set(Some(callback));
     }
 
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {
-        self.0
-            .state
-            .callbacks
-            .hovered_status_change
-            .set(Some(callback));
+        self.0.state.callbacks.hovered_status_change.set(Some(callback));
     }
 
     fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>) {
@@ -973,27 +945,20 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
-        self.0
-            .state
-            .callbacks
-            .hit_test_window_control
-            .set(Some(callback));
+        self.0.state.callbacks.hit_test_window_control.set(Some(callback));
     }
 
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
-        self.0
-            .state
-            .callbacks
-            .appearance_changed
-            .set(Some(callback));
+        self.0.state.callbacks.appearance_changed.set(Some(callback));
     }
 
     fn draw(&self, scene: &Scene) {
-        self.state
-            .renderer
-            .borrow_mut()
-            .draw(scene, self.state.background_appearance.get())
-            .log_err();
+        let result =
+            self.state.renderer.borrow_mut().draw(scene, self.state.background_appearance.get());
+        if let Err(error) = result {
+            log::error!("Failed to draw renderer, invalidating devices: {error:#}");
+            self.state.invalidate_devices.store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -1034,21 +999,15 @@ impl PlatformWindow for WindowsWindow {
             action_handler,
         );
 
-        let activation_handler = A11yActivationHandler {
-            callback: callbacks.activation,
-        };
+        let activation_handler = A11yActivationHandler { callback: callbacks.activation };
 
-        *self.state.a11y.borrow_mut() = Some(A11yState {
-            adapter,
-            activation_handler,
-        });
+        *self.state.a11y.borrow_mut() = Some(A11yState { adapter, activation_handler });
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
         let events = {
             let mut a11y = self.state.a11y.borrow_mut();
-            a11y.as_mut()
-                .and_then(|a11y| a11y.adapter.update_if_active(|| tree_update))
+            a11y.as_mut().and_then(|a11y| a11y.adapter.update_if_active(|| tree_update))
         };
         // The borrow must be dropped before raising events, because
         // `events.raise()` calls `UiaRaiseAutomationPropertyChangedEvent`
@@ -1136,9 +1095,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 });
                 ReleaseStgMedium(&mut idata);
                 let mut cursor_position = cursor_position;
-                ScreenToClient(self.0.hwnd, &mut cursor_position)
-                    .ok()
-                    .log_err();
+                ScreenToClient(self.0.hwnd, &mut cursor_position).ok().log_err();
                 let scale_factor = self.0.state.scale_factor.get();
                 let input = PlatformInput::FileDrop(FileDropEvent::Entered {
                     position: logical_point(
@@ -1169,13 +1126,8 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
             *pdweffect = DROPEFFECT_COPY;
-            self.0
-                .drop_target_helper
-                .DragOver(&cursor_position, *pdweffect)
-                .log_err();
-            ScreenToClient(self.0.hwnd, &mut cursor_position)
-                .ok()
-                .log_err();
+            self.0.drop_target_helper.DragOver(&cursor_position, *pdweffect).log_err();
+            ScreenToClient(self.0.hwnd, &mut cursor_position).ok().log_err();
         }
         let scale_factor = self.0.state.scale_factor.get();
         let input = PlatformInput::FileDrop(FileDropEvent::Pending {
@@ -1211,13 +1163,8 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
             *pdweffect = DROPEFFECT_COPY;
-            self.0
-                .drop_target_helper
-                .Drop(idata_obj, &cursor_position, *pdweffect)
-                .log_err();
-            ScreenToClient(self.0.hwnd, &mut cursor_position)
-                .ok()
-                .log_err();
+            self.0.drop_target_helper.Drop(idata_obj, &cursor_position, *pdweffect).log_err();
+            ScreenToClient(self.0.hwnd, &mut cursor_position).ok().log_err();
         }
         let scale_factor = self.0.state.scale_factor.get();
         let input = PlatformInput::FileDrop(FileDropEvent::Submit {
@@ -1289,7 +1236,7 @@ impl ClickState {
             32 => self
                 .double_click_interval
                 .set(Duration::from_millis(unsafe { GetDoubleClickTime() } as u64)),
-            _ => {}
+            _ => {},
         }
     }
 
@@ -1402,11 +1349,11 @@ unsafe extern "system" fn window_procedure(
                 unsafe { set_window_long(hwnd, GWLP_USERDATA, Box::into_raw(weak) as isize) };
                 window_creation_context.inner = Some(Ok(window_state));
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-            }
+            },
             Err(error) => {
                 window_creation_context.inner = Some(Err(error));
                 LRESULT(0)
-            }
+            },
         };
     }
 
@@ -1575,9 +1522,8 @@ fn set_window_composition_attribute(hwnd: HWND, color: Option<Color>, state: u32
         type SetWindowCompositionAttributeType =
             unsafe extern "system" fn(HWND, *mut WINDOWCOMPOSITIONATTRIBDATA) -> BOOL;
         let module_name = PCSTR::from_raw(c"user32.dll".as_ptr() as *const u8);
-        if let Some(user32) = GetModuleHandleA(module_name)
-            .context("Unable to get user32.dll handle")
-            .log_err()
+        if let Some(user32) =
+            GetModuleHandleA(module_name).context("Unable to get user32.dll handle").log_err()
         {
             let func_name = PCSTR::from_raw(c"SetWindowCompositionAttribute".as_ptr() as *const u8);
             let Some(raw_set_window_composition_attribute) = GetProcAddress(user32, func_name)
@@ -1630,49 +1576,20 @@ mod tests {
     #[test]
     fn test_double_click_interval() {
         let state = ClickState::new();
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))),
-            1
-        );
-        assert_eq!(
-            state.update(MouseButton::Right, point(DevicePixels(0), DevicePixels(0))),
-            1
-        );
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))),
-            1
-        );
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))),
-            2
-        );
-        state
-            .last_click
-            .update(|it| it - Duration::from_millis(700));
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))),
-            1
-        );
+        assert_eq!(state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))), 1);
+        assert_eq!(state.update(MouseButton::Right, point(DevicePixels(0), DevicePixels(0))), 1);
+        assert_eq!(state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))), 1);
+        assert_eq!(state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))), 2);
+        state.last_click.update(|it| it - Duration::from_millis(700));
+        assert_eq!(state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))), 1);
     }
 
     #[test]
     fn test_double_click_spatial_tolerance() {
         let state = ClickState::new();
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(-3), DevicePixels(0))),
-            1
-        );
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(3))),
-            2
-        );
-        assert_eq!(
-            state.update(MouseButton::Right, point(DevicePixels(3), DevicePixels(2))),
-            1
-        );
-        assert_eq!(
-            state.update(MouseButton::Right, point(DevicePixels(10), DevicePixels(0))),
-            1
-        );
+        assert_eq!(state.update(MouseButton::Left, point(DevicePixels(-3), DevicePixels(0))), 1);
+        assert_eq!(state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(3))), 2);
+        assert_eq!(state.update(MouseButton::Right, point(DevicePixels(3), DevicePixels(2))), 1);
+        assert_eq!(state.update(MouseButton::Right, point(DevicePixels(10), DevicePixels(0))), 1);
     }
 }

@@ -97,7 +97,7 @@ impl WgpuContext {
                 err.context("Failed to read value of `ZED_DEVICE_ID` environment variable")
                     .log_err();
                 None
-            }
+            },
         };
 
         // Select an adapter by actually testing surface configuration with the real device.
@@ -172,11 +172,10 @@ impl WgpuContext {
         } else {
             wgpu::Instance::new(descriptor)
         };
-        let surface = instance
-            .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
-            .map_err(|error| {
-                anyhow::anyhow!("Failed to create browser graphics surface: {error}")
-            })?;
+        let surface =
+            instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone())).map_err(
+                |error| anyhow::anyhow!("Failed to create browser graphics surface: {error}"),
+            )?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -198,7 +197,7 @@ impl WgpuContext {
                 anyhow::bail!(
                     "Browser graphics initialization selected unexpected backend {backend:?}"
                 )
-            }
+            },
         };
 
         let device_lost = Arc::new(AtomicBool::new(false));
@@ -236,9 +235,8 @@ impl WgpuContext {
     async fn create_device(
         adapter: &wgpu::Adapter,
     ) -> anyhow::Result<(wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
-        let dual_source_blending = adapter
-            .features()
-            .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
+        let dual_source_blending =
+            adapter.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING);
 
         let mut required_features = wgpu::Features::empty();
         if dual_source_blending {
@@ -278,12 +276,7 @@ impl WgpuContext {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?;
 
-        Ok((
-            device,
-            queue,
-            dual_source_blending,
-            color_atlas_texture_format,
-        ))
+        Ok((device, queue, dual_source_blending, color_atlas_texture_format))
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -324,13 +317,7 @@ impl WgpuContext {
         surface: &wgpu::Surface<'_>,
         compositor_gpu: Option<&CompositorGpuHint>,
         reject_software: bool,
-    ) -> anyhow::Result<(
-        wgpu::Adapter,
-        wgpu::Device,
-        wgpu::Queue,
-        bool,
-        TextureFormat,
-    )> {
+    ) -> anyhow::Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
         let mut adapters: Vec<_> = instance.enumerate_adapters(wgpu::Backends::all()).await;
 
         if adapters.is_empty() {
@@ -367,7 +354,7 @@ impl WgpuContext {
                         && info.device == hint.device_id =>
                 {
                     0
-                }
+                },
                 _ => 1,
             };
 
@@ -388,12 +375,7 @@ impl WgpuContext {
                 _ => 1,
             };
 
-            (
-                user_override,
-                compositor_match,
-                type_priority,
-                backend_priority,
-            )
+            (user_override, compositor_match, type_priority, backend_priority)
         });
 
         // Log all available adapters (in sorted order)
@@ -415,11 +397,7 @@ impl WgpuContext {
             let info = adapter.get_info();
 
             if reject_software && info.device_type == wgpu::DeviceType::Cpu {
-                log::info!(
-                    "Skipping software renderer: {} ({:?})",
-                    info.name,
-                    info.backend
-                );
+                log::info!("Skipping software renderer: {} ({:?})", info.name, info.backend);
                 continue;
             }
 
@@ -439,7 +417,7 @@ impl WgpuContext {
                         dual_source_blending,
                         color_atlas_texture_format,
                     ));
-                }
+                },
                 Err(e) => {
                     log::info!(
                         "  Adapter {} ({:?}) failed: {}, trying next...",
@@ -447,7 +425,7 @@ impl WgpuContext {
                         info.backend,
                         e
                     );
-                }
+                },
             }
         }
 
@@ -491,12 +469,7 @@ impl WgpuContext {
             anyhow::bail!("surface configuration failed: {e}");
         }
 
-        Ok((
-            device,
-            queue,
-            dual_source_blending,
-            color_atlas_texture_format,
-        ))
+        Ok((device, queue, dual_source_blending, color_atlas_texture_format))
     }
 
     fn select_color_texture_format(adapter: &wgpu::Adapter) -> anyhow::Result<wgpu::TextureFormat> {
@@ -574,10 +547,7 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
     }
     let is_hex_string = id.chars().all(|c| c.is_ascii_hexdigit());
     let is_4_chars = id.len() == 4;
-    anyhow::ensure!(
-        is_4_chars && is_hex_string,
-        "Expected a 4 digit PCI ID in hexadecimal format"
-    );
+    anyhow::ensure!(is_4_chars && is_hex_string, "Expected a 4 digit PCI ID in hexadecimal format");
 
     u32::from_str_radix(id, 16).context("parsing PCI ID as hex")
 }

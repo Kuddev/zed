@@ -1,6 +1,10 @@
 use collections::FxHashMap;
+#[path = "stream_image.rs"]
+mod stream_image;
 use etagere::BucketedAtlasAllocator;
 use parking_lot::Mutex;
+use std::sync::Arc;
+use stream_image::{NativeStreamImage, STREAM_TEXTURE_BIT};
 use windows::Win32::Graphics::{
     Direct3D11::{
         D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -8,13 +12,14 @@ use windows::Win32::Graphics::{
     },
     Dxgi::Common::*,
 };
+use windows::Win32::System::Threading::GetCurrentThreadId;
 
 use gpui::{
     AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
     PlatformAtlas, Point, Size,
 };
 
-pub(crate) struct DirectXAtlas(Mutex<DirectXAtlasState>);
+pub(crate) struct DirectXAtlas(Mutex<DirectXAtlasState>, u32);
 
 struct DirectXAtlasState {
     device: ID3D11Device,
@@ -23,6 +28,12 @@ struct DirectXAtlasState {
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+    streams: FxHashMap<u64, NativeStreamImage>,
+    device_epoch: u64,
+}
+struct PreparedNativeBackground {
+    image: NativeStreamImage,
+    device_epoch: u64,
 }
 
 struct DirectXAtlasTexture {
@@ -36,14 +47,19 @@ struct DirectXAtlasTexture {
 
 impl DirectXAtlas {
     pub(crate) fn new(device: &ID3D11Device, device_context: &ID3D11DeviceContext) -> Self {
-        DirectXAtlas(Mutex::new(DirectXAtlasState {
-            device: device.clone(),
-            device_context: device_context.clone(),
-            monochrome_textures: Default::default(),
-            polychrome_textures: Default::default(),
-            subpixel_textures: Default::default(),
-            tiles_by_key: Default::default(),
-        }))
+        DirectXAtlas(
+            Mutex::new(DirectXAtlasState {
+                device: device.clone(),
+                device_context: device_context.clone(),
+                monochrome_textures: Default::default(),
+                polychrome_textures: Default::default(),
+                subpixel_textures: Default::default(),
+                tiles_by_key: Default::default(),
+                streams: Default::default(),
+                device_epoch: 0,
+            }),
+            unsafe { GetCurrentThreadId() },
+        )
     }
 
     pub(crate) fn get_texture_view(
@@ -51,6 +67,13 @@ impl DirectXAtlas {
         id: AtlasTextureId,
     ) -> [Option<ID3D11ShaderResourceView>; 1] {
         let lock = self.0.lock();
+        if id.kind == AtlasTextureKind::Polychrome && id.index & STREAM_TEXTURE_BIT != 0 {
+            return lock
+                .streams
+                .get(&u64::from(id.index & !STREAM_TEXTURE_BIT))
+                .map(NativeStreamImage::view)
+                .unwrap_or([None]);
+        }
         let tex = lock.texture(id);
         tex.view.clone()
     }
@@ -59,18 +82,177 @@ impl DirectXAtlas {
         &self,
         device: &ID3D11Device,
         device_context: &ID3D11DeviceContext,
-    ) {
+    ) -> anyhow::Result<()> {
         let mut lock = self.0.lock();
+        anyhow::ensure!(
+            lock.streams.is_empty() || unsafe { lock.device.GetDeviceRemovedReason() }.is_err(),
+            "live stream resources require completion before a healthy device reset"
+        );
+        lock.streams.clear();
+        lock.device_epoch = lock
+            .device_epoch
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("background device epoch exhausted"))?;
+        stream_image::recover_quarantined();
         lock.device = device.clone();
         lock.device_context = device_context.clone();
         lock.monochrome_textures = AtlasTextureList::default();
         lock.polychrome_textures = AtlasTextureList::default();
         lock.subpixel_textures = AtlasTextureList::default();
         lock.tiles_by_key.clear();
+        Ok(())
+    }
+
+    pub(crate) fn finish_stream_frame(&self, scene: &gpui::Scene) -> anyhow::Result<()> {
+        let mut lock = self.0.lock();
+        let ids: collections::FxHashSet<u64> = scene
+            .polychrome_sprites
+            .iter()
+            .filter(|sprite| sprite.tile.texture_id.index & STREAM_TEXTURE_BIT != 0)
+            .map(|sprite| u64::from(sprite.tile.texture_id.index & !STREAM_TEXTURE_BIT))
+            .collect();
+        for id in ids {
+            if let Some(stream) = lock.streams.get_mut(&id) {
+                stream.signal()?;
+            }
+        }
+        // Completion must progress even when the window stops presenting next.
+        if !lock.streams.is_empty() {
+            unsafe { lock.device_context.Flush() };
+        }
+        Ok(())
     }
 }
 
 impl PlatformAtlas for DirectXAtlas {
+    fn invalidate_background_preparations_for_test(&self) -> anyhow::Result<()> {
+        let mut lock = self.0.lock();
+        anyhow::ensure!(
+            lock.streams.is_empty(),
+            "epoch fault injection requires no published streams"
+        );
+        lock.device_epoch = lock
+            .device_epoch
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("background epoch exhausted"))?;
+        Ok(())
+    }
+    fn stage_stream_image(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        frame: &gpui::StreamImageFrame<'_>,
+    ) -> anyhow::Result<gpui::StreamImageUpdate> {
+        let mut lock = self.0.lock();
+        if !lock.streams.contains_key(&id.value()) {
+            let stream = NativeStreamImage::new(
+                &lock.device,
+                &lock.device_context,
+                id,
+                budgets,
+                frame.size,
+            )?;
+            lock.streams.insert(id.value(), stream);
+        }
+        lock.streams
+            .get_mut(&id.value())
+            .ok_or_else(|| anyhow::anyhow!("missing stream owner"))?
+            .stage(frame)
+    }
+    fn retire_stream_image(
+        &self,
+        id: gpui::StreamImageId,
+    ) -> anyhow::Result<Option<gpui::StreamImageCompletion>> {
+        let stream = self.0.lock().streams.remove(&id.value());
+        stream.map(NativeStreamImage::retire).transpose()
+    }
+    fn stage_background_shader(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        frame: &gpui::BackgroundShaderFrame<'_>,
+    ) -> anyhow::Result<gpui::StreamImageUpdate> {
+        let mut lock = self.0.lock();
+        budgets.ensure_available()?;
+        lock.streams
+            .get_mut(&id.value())
+            .ok_or_else(|| anyhow::anyhow!("missing shader owner"))?
+            .render_shader(frame)
+    }
+    fn background_shader_factory(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        size: Size<DevicePixels>,
+        bytecode: Arc<[u8]>,
+        cancellation: gpui::BackgroundShaderCancellation,
+    ) -> anyhow::Result<
+        Box<dyn FnOnce() -> anyhow::Result<Option<gpui::PreparedBackgroundShader>> + Send>,
+    > {
+        let lock = self.0.lock();
+        anyhow::ensure!(
+            !lock.streams.contains_key(&id.value()),
+            "owner already contains a prepared source"
+        );
+        let device = lock.device.clone();
+        let context = lock.device_context.clone();
+        let epoch = lock.device_epoch;
+        let owning_thread = self.1;
+        let budgets = budgets.clone();
+        Ok(Box::new(move || {
+            anyhow::ensure!(
+                unsafe { GetCurrentThreadId() } != owning_thread,
+                "background shader factory ran on its UI thread"
+            );
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            let mut image = NativeStreamImage::new_shader(&device, &context, id, &budgets, size)?;
+            // Qualification injection pauses after actual allocation, so close/cancel
+            // tests observe held bytes until the worker resumes and releases them.
+            if let Some(delay) = std::env::var_os("PEBREL_SHADER_AFTER_ALLOCATION_MS") {
+                let delay: u64 = delay.to_string_lossy().parse()?;
+                anyhow::ensure!(delay <= 5000, "qualification delay exceeds its finite limit");
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            image.prepare_shader(&bytecode)?;
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            budgets.ensure_available()?;
+            Ok(Some(gpui::PreparedBackgroundShader::new(
+                id,
+                PreparedNativeBackground { image, device_epoch: epoch },
+            )))
+        }))
+    }
+    fn adopt_background_shader(
+        &self,
+        id: gpui::StreamImageId,
+        prepared: gpui::PreparedBackgroundShader,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            unsafe { GetCurrentThreadId() } == self.1,
+            "background adoption must run on its UI thread"
+        );
+        let prepared = prepared.into_native::<PreparedNativeBackground>(id)?;
+        let mut lock = self.0.lock();
+        unsafe { lock.device.GetDeviceRemovedReason() }?;
+        anyhow::ensure!(
+            prepared.device_epoch == lock.device_epoch
+                && prepared.image.belongs_to_device(&lock.device),
+            "prepared background has an obsolete device epoch"
+        );
+        anyhow::ensure!(
+            !lock.streams.contains_key(&id.value()),
+            "background owner already published"
+        );
+        lock.streams.insert(id.value(), prepared.image);
+        Ok(())
+    }
     fn get_or_insert_with<'a>(
         &self,
         key: &AtlasKey,
@@ -138,10 +320,7 @@ impl DirectXAtlasState {
                 AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
             };
 
-            if let Some(tile) = textures
-                .iter_mut()
-                .rev()
-                .find_map(|texture| texture.allocate(size))
+            if let Some(tile) = textures.iter_mut().rev().find_map(|texture| texture.allocate(size))
             {
                 return Some(tile);
             }
@@ -156,16 +335,12 @@ impl DirectXAtlasState {
         min_size: Size<DevicePixels>,
         kind: AtlasTextureKind,
     ) -> Option<&mut DirectXAtlasTexture> {
-        const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
-            width: DevicePixels(1024),
-            height: DevicePixels(1024),
-        };
+        const DEFAULT_ATLAS_SIZE: Size<DevicePixels> =
+            Size { width: DevicePixels(1024), height: DevicePixels(1024) };
         // Max texture size for DirectX. See:
         // https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-resources-limits
-        const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
-            width: DevicePixels(16384),
-            height: DevicePixels(16384),
-        };
+        const MAX_ATLAS_SIZE: Size<DevicePixels> =
+            Size { width: DevicePixels(16384), height: DevicePixels(16384) };
         let size = min_size.min(&MAX_ATLAS_SIZE).max(&DEFAULT_ATLAS_SIZE);
         let pixel_format;
         let bind_flag;
@@ -175,17 +350,17 @@ impl DirectXAtlasState {
                 pixel_format = DXGI_FORMAT_R8_UNORM;
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 1;
-            }
+            },
             AtlasTextureKind::Polychrome => {
                 pixel_format = DXGI_FORMAT_B8G8R8A8_UNORM;
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 4;
-            }
+            },
             AtlasTextureKind::Subpixel => {
                 pixel_format = DXGI_FORMAT_R8G8B8A8_UNORM;
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 4;
-            }
+            },
         }
         let texture_desc = D3D11_TEXTURE2D_DESC {
             Width: size.width.0 as u32,
@@ -193,10 +368,7 @@ impl DirectXAtlasState {
             MipLevels: 1,
             ArraySize: 1,
             Format: pixel_format,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: bind_flag.0 as u32,
             CPUAccessFlags: 0,
@@ -206,9 +378,7 @@ impl DirectXAtlasState {
         unsafe {
             // This only returns None if the device is lost, which we will recreate later.
             // So it's ok to return None here.
-            self.device
-                .CreateTexture2D(&texture_desc, None, Some(&mut texture))
-                .ok()?;
+            self.device.CreateTexture2D(&texture_desc, None, Some(&mut texture)).ok()?;
         }
         let texture = texture.unwrap();
 
@@ -220,16 +390,11 @@ impl DirectXAtlasState {
         let index = texture_list.free_list.pop();
         let view = unsafe {
             let mut view = None;
-            self.device
-                .CreateShaderResourceView(&texture, None, Some(&mut view))
-                .ok()?;
+            self.device.CreateShaderResourceView(&texture, None, Some(&mut view)).ok()?;
             [view]
         };
         let atlas_texture = DirectXAtlasTexture {
-            id: AtlasTextureId {
-                index: index.unwrap_or(texture_list.textures.len()) as u32,
-                kind,
-            },
+            id: AtlasTextureId { index: index.unwrap_or(texture_list.textures.len()) as u32, kind },
             bytes_per_pixel,
             allocator: etagere::BucketedAtlasAllocator::new(device_size_to_etagere(size)),
             texture,
@@ -247,15 +412,15 @@ impl DirectXAtlasState {
 
     fn texture(&self, id: AtlasTextureId) -> &DirectXAtlasTexture {
         match id.kind {
-            AtlasTextureKind::Monochrome => &self.monochrome_textures[id.index as usize]
-                .as_ref()
-                .unwrap(),
-            AtlasTextureKind::Polychrome => &self.polychrome_textures[id.index as usize]
-                .as_ref()
-                .unwrap(),
+            AtlasTextureKind::Monochrome => {
+                &self.monochrome_textures[id.index as usize].as_ref().unwrap()
+            },
+            AtlasTextureKind::Polychrome => {
+                &self.polychrome_textures[id.index as usize].as_ref().unwrap()
+            },
             AtlasTextureKind::Subpixel => {
                 &self.subpixel_textures[id.index as usize].as_ref().unwrap()
-            }
+            },
         }
     }
 }
@@ -266,10 +431,7 @@ impl DirectXAtlasTexture {
         let tile = AtlasTile {
             texture_id: self.id,
             tile_id: allocation.id.into(),
-            bounds: Bounds {
-                origin: etagere_point_to_device(allocation.rectangle.min),
-                size,
-            },
+            bounds: Bounds { origin: etagere_point_to_device(allocation.rectangle.min), size },
             padding: 0,
         };
         self.live_atlas_keys += 1;
@@ -333,10 +495,7 @@ fn device_size_to_etagere(size: Size<DevicePixels>) -> etagere::Size {
 }
 
 fn etagere_point_to_device(value: etagere::Point) -> Point<DevicePixels> {
-    Point {
-        x: DevicePixels::from(value.x),
-        y: DevicePixels::from(value.y),
-    }
+    Point { x: DevicePixels::from(value.x), y: DevicePixels::from(value.y) }
 }
 
 #[cfg(test)]
@@ -373,10 +532,7 @@ mod tests {
     }
 
     fn make_image_key(image_id: usize) -> AtlasKey {
-        AtlasKey::Image(RenderImageParams {
-            image_id: ImageId(image_id),
-            frame_index: 0,
-        })
+        AtlasKey::Image(RenderImageParams { image_id: ImageId(image_id), frame_index: 0 })
     }
 
     fn insert_tile(atlas: &DirectXAtlas, key: &AtlasKey, size: Size<DevicePixels>) -> AtlasTile {
@@ -395,14 +551,8 @@ mod tests {
             return;
         };
 
-        let small = Size {
-            width: DevicePixels(64),
-            height: DevicePixels(64),
-        };
-        let big = Size {
-            width: DevicePixels(700),
-            height: DevicePixels(700),
-        };
+        let small = Size { width: DevicePixels(64), height: DevicePixels(64) };
+        let big = Size { width: DevicePixels(700), height: DevicePixels(700) };
 
         let keeper_key = make_image_key(1);
         let big_key_a = make_image_key(2);

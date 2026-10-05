@@ -24,10 +24,7 @@ mod visual_test;
 ))]
 pub mod scap_screen_capture;
 
-#[cfg(all(
-    any(target_os = "windows", target_os = "linux"),
-    feature = "screen-capture"
-))]
+#[cfg(all(any(target_os = "windows", target_os = "linux"), feature = "screen-capture"))]
 pub(crate) type PlatformScreenCaptureFrame = scap::frame::Frame;
 #[cfg(not(feature = "screen-capture"))]
 pub(crate) type PlatformScreenCaptureFrame = ();
@@ -151,9 +148,7 @@ pub trait Platform: 'static {
     ) -> oneshot::Receiver<anyhow::Result<Vec<Rc<dyn ScreenCaptureSource>>>> {
         let (sources_tx, sources_rx) = oneshot::channel();
         sources_tx
-            .send(Err(anyhow::anyhow!(
-                "gpui was compiled without the screen-capture feature"
-            )))
+            .send(Err(anyhow::anyhow!("gpui was compiled without the screen-capture feature")))
             .ok();
         sources_rx
     }
@@ -534,12 +529,7 @@ pub struct WindowControls {
 impl Default for WindowControls {
     fn default() -> Self {
         // Assume that we can do anything, unless told otherwise
-        Self {
-            fullscreen: true,
-            maximize: true,
-            minimize: true,
-            window_menu: true,
-        }
+        Self { fullscreen: true, maximize: true, minimize: true, window_menu: true }
     }
 }
 
@@ -624,7 +614,7 @@ impl WindowButtonLayout {
                     other => {
                         unrecognized.push(other.to_string());
                         None
-                    }
+                    },
                 };
                 if let Some(button) = button {
                     if seen_buttons[button.index()] {
@@ -698,12 +688,7 @@ pub struct Tiling {
 impl Tiling {
     /// Initializes a [`Tiling`] type with all sides tiled
     pub fn tiled() -> Self {
-        Self {
-            top: true,
-            left: true,
-            right: true,
-            bottom: true,
-        }
+        Self { top: true, left: true, right: true, bottom: true }
     }
 
     /// Whether any edge is tiled
@@ -1121,23 +1106,14 @@ impl PlatformTextSystem for NoopTextSystem {
             cap_height: 698.0,
             x_height: 516.0,
             bounding_box: Bounds {
-                origin: Point {
-                    x: -260.0,
-                    y: -245.0,
-                },
-                size: Size {
-                    width: 1501.0,
-                    height: 1364.0,
-                },
+                origin: Point { x: -260.0, y: -245.0 },
+                size: Size { width: 1501.0, height: 1364.0 },
             },
         }
     }
 
     fn typographic_bounds(&self, _font_id: FontId, _glyph_id: GlyphId) -> Result<Bounds<f32>> {
-        Ok(Bounds {
-            origin: Point { x: 54.0, y: 0.0 },
-            size: size(392.0, 528.0),
-        })
+        Ok(Bounds { origin: Point { x: 54.0, y: 0.0 }, size: size(392.0, 528.0) })
     }
 
     fn advance(&self, _font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
@@ -1164,10 +1140,7 @@ impl PlatformTextSystem for NoopTextSystem {
         let mut position = px(0.);
         let metrics = self.font_metrics(FontId(0));
         let em_width = font_size
-            * self
-                .advance(FontId(0), self.glyph_for_char(FontId(0), 'm').unwrap())
-                .unwrap()
-                .width
+            * self.advance(FontId(0), self.glyph_for_char(FontId(0), 'm').unwrap()).unwrap().width
             / metrics.units_per_em as f32;
         let mut glyphs = Vec::new();
         for (ix, c) in text.char_indices() {
@@ -1189,10 +1162,7 @@ impl PlatformTextSystem for NoopTextSystem {
         }
         let mut runs = Vec::default();
         if !glyphs.is_empty() {
-            runs.push(ShapedRun {
-                font_id: FontId(0),
-                glyphs,
-            });
+            runs.push(ShapedRun { font_id: FontId(0), glyphs });
         } else {
             position = px(0.);
         }
@@ -1244,12 +1214,7 @@ pub fn get_gamma_correction_ratios(gamma: f32) -> [f32; 4] {
     let index = ((gamma * 10.0).round() as usize).clamp(10, 22) - 10;
     let ratios = GAMMA_INCORRECT_TARGET_RATIOS[index];
 
-    [
-        ratios[0] * NORM13,
-        ratios[1] * NORM24,
-        ratios[2] * NORM13,
-        ratios[3] * NORM24,
-    ]
+    [ratios[0] * NORM13, ratios[1] * NORM24, ratios[2] * NORM13, ratios[3] * NORM24]
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -1279,7 +1244,7 @@ impl AtlasKey {
                 } else {
                     AtlasTextureKind::Monochrome
                 }
-            }
+            },
             AtlasKey::Svg(_) => AtlasTextureKind::Monochrome,
             AtlasKey::Image(_) => AtlasTextureKind::Polychrome,
         }
@@ -1313,6 +1278,86 @@ pub trait PlatformAtlas {
     ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
 
+    fn stream_image_factory(
+        &self,
+        _id: crate::StreamImageId,
+        _budgets: &crate::StreamImageBudgets,
+        _size: Size<DevicePixels>,
+        _cancellation: crate::BackgroundShaderCancellation,
+    ) -> Result<Box<dyn FnOnce() -> Result<Option<crate::PreparedStreamImage>> + Send>> {
+        anyhow::bail!("stream image preparation is unsupported on this renderer")
+    }
+    fn adopt_stream_image(
+        &self,
+        _id: crate::StreamImageId,
+        _prepared: crate::PreparedStreamImage,
+    ) -> Result<()> {
+        anyhow::bail!("stream image preparation is unsupported on this renderer")
+    }
+    fn stage_stream_image(
+        &self,
+        _id: crate::StreamImageId,
+        _budgets: &crate::StreamImageBudgets,
+        _frame: &crate::StreamImageFrame<'_>,
+    ) -> Result<crate::StreamImageUpdate> {
+        anyhow::bail!("stream images are unsupported on this renderer")
+    }
+    fn retire_stream_image(
+        &self,
+        _id: crate::StreamImageId,
+    ) -> Result<Option<crate::StreamImageCompletion>> {
+        Ok(None)
+    }
+    fn stage_background_shader(
+        &self,
+        _id: crate::StreamImageId,
+        _budgets: &crate::StreamImageBudgets,
+        _frame: &crate::BackgroundShaderFrame<'_>,
+    ) -> Result<crate::StreamImageUpdate> {
+        anyhow::bail!("background shaders are unsupported on this renderer")
+    }
+    fn background_shader_factory(
+        &self,
+        _id: crate::StreamImageId,
+        _budgets: &crate::StreamImageBudgets,
+        _size: Size<DevicePixels>,
+        _bytecode: std::sync::Arc<[u8]>,
+        _cancellation: crate::BackgroundShaderCancellation,
+    ) -> Result<Box<dyn FnOnce() -> Result<Option<crate::PreparedBackgroundShader>> + Send>> {
+        anyhow::bail!("background shader preparation is unsupported on this renderer")
+    }
+    fn adopt_background_shader(
+        &self,
+        _id: crate::StreamImageId,
+        _prepared: crate::PreparedBackgroundShader,
+    ) -> Result<()> {
+        anyhow::bail!("background shader preparation is unsupported on this renderer")
+    }
+
+    fn invalidate_background_preparations_for_test(&self) -> Result<()> {
+        anyhow::bail!("background preparation fault injection is unsupported")
+    }
+
+    fn background_wgsl_factory(
+        &self,
+        _id: crate::StreamImageId,
+        _budgets: &crate::StreamImageBudgets,
+        _size: Size<DevicePixels>,
+        _source: std::sync::Arc<str>,
+        _entry: std::sync::Arc<str>,
+        _cancellation: crate::BackgroundShaderCancellation,
+    ) -> Result<Box<dyn FnOnce() -> Result<Option<crate::PreparedBackgroundShader>> + Send>> {
+        anyhow::bail!("WGSL background preparation is unsupported on this renderer")
+    }
+    fn stage_background_wgsl(
+        &self,
+        _id: crate::StreamImageId,
+        _budgets: &crate::StreamImageBudgets,
+        _frame: &crate::BackgroundWgslFrame<'_>,
+    ) -> Result<crate::StreamImageUpdate> {
+        anyhow::bail!("WGSL backgrounds are unsupported on this renderer")
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn contains(&self, _key: &AtlasKey) -> bool {
         false
@@ -1327,10 +1372,7 @@ pub struct AtlasTextureList<T> {
 
 impl<T> Default for AtlasTextureList<T> {
     fn default() -> Self {
-        Self {
-            textures: Vec::default(),
-            free_list: Vec::default(),
-        }
+        Self { textures: Vec::default(), free_list: Vec::default() }
     }
 }
 
@@ -1435,8 +1477,7 @@ impl PlatformInputHandler {
     pub fn selected_text_range(&mut self, ignore_disabled_input: bool) -> Option<UTF16Selection> {
         self.cx
             .update(|window, cx| {
-                self.handler
-                    .selected_text_range(ignore_disabled_input, window, cx)
+                self.handler.selected_text_range(ignore_disabled_input, window, cx)
             })
             .ok()
             .flatten()
@@ -1444,10 +1485,7 @@ impl PlatformInputHandler {
 
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn marked_text_range(&mut self) -> Option<Range<usize>> {
-        self.cx
-            .update(|window, cx| self.handler.marked_text_range(window, cx))
-            .ok()
-            .flatten()
+        self.cx.update(|window, cx| self.handler.marked_text_range(window, cx)).ok().flatten()
     }
 
     #[cfg_attr(
@@ -1460,10 +1498,7 @@ impl PlatformInputHandler {
         adjusted: &mut Option<Range<usize>>,
     ) -> Option<String> {
         self.cx
-            .update(|window, cx| {
-                self.handler
-                    .text_for_range(range_utf16, adjusted, window, cx)
-            })
+            .update(|window, cx| self.handler.text_for_range(range_utf16, adjusted, window, cx))
             .ok()
             .flatten()
     }
@@ -1471,8 +1506,7 @@ impl PlatformInputHandler {
     pub fn replace_text_in_range(&mut self, replacement_range: Option<Range<usize>>, text: &str) {
         self.cx
             .update(|window, cx| {
-                self.handler
-                    .replace_text_in_range(replacement_range, text, window, cx);
+                self.handler.replace_text_in_range(replacement_range, text, window, cx);
             })
             .ok();
     }
@@ -1498,9 +1532,7 @@ impl PlatformInputHandler {
 
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn unmark_text(&mut self) {
-        self.cx
-            .update(|window, cx| self.handler.unmark_text(window, cx))
-            .ok();
+        self.cx.update(|window, cx| self.handler.unmark_text(window, cx)).ok();
     }
 
     pub fn bounds_for_range(&mut self, range_utf16: Range<usize>) -> Option<Bounds<Pixels>> {
@@ -1545,11 +1577,8 @@ impl PlatformInputHandler {
             bounds_for_range(line_start..line_start)
         } else {
             // No active composition — use the selection endpoint.
-            let offset = if selection.reversed {
-                selection.range.start
-            } else {
-                selection.range.end
-            };
+            let offset =
+                if selection.reversed { selection.range.start } else { selection.range.end };
             bounds_for_range(offset..offset)
         }
     }
@@ -1581,27 +1610,18 @@ impl PlatformInputHandler {
     /// See [`InputHandler::set_selected_text_range`].
     pub fn set_selected_text_range(&mut self, range_utf16: Range<usize>) {
         self.cx
-            .update(|window, cx| {
-                self.handler
-                    .set_selected_text_range(range_utf16, window, cx)
-            })
+            .update(|window, cx| self.handler.set_selected_text_range(range_utf16, window, cx))
             .ok();
     }
 
     /// See [`InputHandler::element_bounds`].
     pub fn element_bounds(&mut self) -> Option<Bounds<Pixels>> {
-        self.cx
-            .update(|window, cx| self.handler.element_bounds(window, cx))
-            .ok()
-            .flatten()
+        self.cx.update(|window, cx| self.handler.element_bounds(window, cx)).ok().flatten()
     }
 
     /// See [`InputHandler::text_length_utf16`].
     pub fn text_length_utf16(&mut self) -> Option<usize> {
-        self.cx
-            .update(|window, cx| self.handler.text_length_utf16(window, cx))
-            .ok()
-            .flatten()
+        self.cx.update(|window, cx| self.handler.text_length_utf16(window, cx)).ok().flatten()
     }
 
     #[allow(dead_code)]
@@ -1611,9 +1631,7 @@ impl PlatformInputHandler {
 
     #[allow(dead_code)]
     pub fn query_accepts_text_input(&mut self) -> bool {
-        self.cx
-            .update(|window, cx| self.handler.accepts_text_input(window, cx))
-            .unwrap_or(true)
+        self.cx.update(|window, cx| self.handler.accepts_text_input(window, cx)).unwrap_or(true)
     }
 
     /// See [`InputHandler::prefers_ime_for_printable_keys`].
@@ -2282,9 +2300,7 @@ pub enum ClipboardEntry {
 impl ClipboardItem {
     /// Create a new ClipboardItem::String with no associated metadata
     pub fn new_string(text: String) -> Self {
-        Self {
-            entries: vec![ClipboardEntry::String(ClipboardString::new(text))],
-        }
+        Self { entries: vec![ClipboardEntry::String(ClipboardString::new(text))] }
     }
 
     /// Create a new ClipboardItem::String with the given text and associated metadata
@@ -2308,9 +2324,7 @@ impl ClipboardItem {
 
     /// Create a new ClipboardItem::Image with the given image with no associated metadata
     pub fn new_image(image: &Image) -> Self {
-        Self {
-            entries: vec![ClipboardEntry::Image(image.clone())],
-        }
+        Self { entries: vec![ClipboardEntry::Image(image.clone())] }
     }
 
     /// Concatenates together all the ClipboardString entries in the item.
@@ -2335,11 +2349,7 @@ impl ClipboardItem {
             }
         }
 
-        if !answer.is_empty() {
-            Some(answer)
-        } else {
-            None
-        }
+        if !answer.is_empty() { Some(answer) } else { None }
     }
 
     /// If this item is one ClipboardEntry::String, returns its metadata.
@@ -2348,7 +2358,7 @@ impl ClipboardItem {
         match self.entries().first() {
             Some(ClipboardEntry::String(clipboard_string)) if self.entries.len() == 1 => {
                 clipboard_string.metadata.as_ref()
-            }
+            },
             _ => None,
         }
     }
@@ -2384,9 +2394,7 @@ impl From<Image> for ClipboardEntry {
 
 impl From<ClipboardEntry> for ClipboardItem {
     fn from(value: ClipboardEntry) -> Self {
-        Self {
-            entries: vec![value],
-        }
+        Self { entries: vec![value] }
     }
 }
 
@@ -2503,9 +2511,7 @@ pub(crate) fn decode_static_image(
 pub(crate) fn decode_static_image_from_decoder(
     mut decoder: impl image::ImageDecoder,
 ) -> Result<SmallVec<[Frame; 1]>> {
-    let orientation = decoder
-        .orientation()
-        .context("reading decoder's orientation")?;
+    let orientation = decoder.orientation().context("reading decoder's orientation")?;
     let mut image = DynamicImage::from_decoder(decoder).context("decoding image")?;
     image.apply_orientation(orientation);
 
@@ -2531,11 +2537,7 @@ impl Image {
 
     /// Create an image from a format and bytes
     pub fn from_bytes(format: ImageFormat, bytes: Vec<u8>) -> Self {
-        Self {
-            id: hash(&bytes),
-            format,
-            bytes,
-        }
+        Self { id: hash(&bytes), format, bytes }
     }
 
     /// Get this image's ID
@@ -2549,9 +2551,7 @@ impl Image {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Arc<RenderImage>> {
-        ImageSource::Image(self)
-            .use_data(None, window, cx)
-            .and_then(|result| result.ok())
+        ImageSource::Image(self).use_data(None, window, cx).and_then(|result| result.ok())
     }
 
     /// Use the GPUI `get_asset` API to make this image renderable
@@ -2560,9 +2560,7 @@ impl Image {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Arc<RenderImage>> {
-        ImageSource::Image(self)
-            .get_data(None, window, cx)
-            .and_then(|result| result.ok())
+        ImageSource::Image(self).get_data(None, window, cx).and_then(|result| result.ok())
     }
 
     /// Use the GPUI `remove_asset` API to drop this image, if possible.
@@ -2592,10 +2590,10 @@ impl Image {
                                 pixel.swap(0, 2);
                             }
                             frames.push(frame);
-                        }
+                        },
                         Err(err) => {
                             log::debug!("Skipping GIF frame due to decode error: {err}");
-                        }
+                        },
                     }
                 }
 
@@ -2604,7 +2602,7 @@ impl Image {
                 }
 
                 frames
-            }
+            },
             ImageFormat::Png => decode_static_image(&self.bytes, image::ImageFormat::Png)?,
             ImageFormat::Jpeg => decode_static_image(&self.bytes, image::ImageFormat::Jpeg)?,
             ImageFormat::Webp => decode_static_image(&self.bytes, image::ImageFormat::WebP)?,
@@ -2612,10 +2610,8 @@ impl Image {
             ImageFormat::Tiff => decode_static_image(&self.bytes, image::ImageFormat::Tiff)?,
             ImageFormat::Ico => decode_static_image(&self.bytes, image::ImageFormat::Ico)?,
             ImageFormat::Svg => {
-                return svg_renderer
-                    .render_single_frame(&self.bytes, 1.0)
-                    .map_err(Into::into);
-            }
+                return svg_renderer.render_single_frame(&self.bytes, 1.0).map_err(Into::into);
+            },
             ImageFormat::Pnm => decode_static_image(&self.bytes, image::ImageFormat::Pnm)?,
         };
 
@@ -2645,10 +2641,7 @@ pub struct ClipboardString {
 impl ClipboardString {
     /// Create a new clipboard string with the given text
     pub fn new(text: String) -> Self {
-        Self {
-            text,
-            metadata: None,
-        }
+        Self { text, metadata: None }
     }
 
     /// Return a new clipboard item with the metadata replaced by the given metadata,
@@ -2673,9 +2666,7 @@ impl ClipboardString {
     where
         T: for<'a> Deserialize<'a>,
     {
-        self.metadata
-            .as_ref()
-            .and_then(|m| serde_json::from_str(m).ok())
+        self.metadata.as_ref().and_then(|m| serde_json::from_str(m).ok())
     }
 
     #[cfg_attr(any(target_os = "linux", target_os = "freebsd"), allow(dead_code))]
@@ -2689,10 +2680,7 @@ impl ClipboardString {
 
 impl From<String> for ClipboardString {
     fn from(value: String) -> Self {
-        Self {
-            text: value,
-            metadata: None,
-        }
+        Self { text: value, metadata: None }
     }
 }
 
@@ -2744,14 +2732,7 @@ mod tests {
     #[test]
     fn test_window_button_layout_parse_standard() {
         let layout = WindowButtonLayout::parse("close,minimize:maximize").unwrap();
-        assert_eq!(
-            layout.left,
-            [
-                Some(WindowButton::Close),
-                Some(WindowButton::Minimize),
-                None
-            ]
-        );
+        assert_eq!(layout.left, [Some(WindowButton::Close), Some(WindowButton::Minimize), None]);
         assert_eq!(layout.right, [Some(WindowButton::Maximize), None, None]);
     }
 
@@ -2761,11 +2742,7 @@ mod tests {
         assert_eq!(layout.left, [None, None, None]);
         assert_eq!(
             layout.right,
-            [
-                Some(WindowButton::Minimize),
-                Some(WindowButton::Maximize),
-                Some(WindowButton::Close)
-            ]
+            [Some(WindowButton::Minimize), Some(WindowButton::Maximize), Some(WindowButton::Close)]
         );
     }
 
@@ -2774,11 +2751,7 @@ mod tests {
         let layout = WindowButtonLayout::parse("close,minimize,maximize:").unwrap();
         assert_eq!(
             layout.left,
-            [
-                Some(WindowButton::Close),
-                Some(WindowButton::Minimize),
-                Some(WindowButton::Maximize)
-            ]
+            [Some(WindowButton::Close), Some(WindowButton::Minimize), Some(WindowButton::Maximize)]
         );
         assert_eq!(layout.right, [None, None, None]);
     }
@@ -2786,14 +2759,7 @@ mod tests {
     #[test]
     fn test_window_button_layout_parse_with_whitespace() {
         let layout = WindowButtonLayout::parse(" close , minimize : maximize ").unwrap();
-        assert_eq!(
-            layout.left,
-            [
-                Some(WindowButton::Close),
-                Some(WindowButton::Minimize),
-                None
-            ]
-        );
+        assert_eq!(layout.left, [Some(WindowButton::Close), Some(WindowButton::Minimize), None]);
         assert_eq!(layout.right, [Some(WindowButton::Maximize), None, None]);
     }
 
@@ -2814,28 +2780,14 @@ mod tests {
     #[test]
     fn test_window_button_layout_parse_invalid_buttons() {
         let layout = WindowButtonLayout::parse("close,invalid,minimize:maximize,foo").unwrap();
-        assert_eq!(
-            layout.left,
-            [
-                Some(WindowButton::Close),
-                Some(WindowButton::Minimize),
-                None
-            ]
-        );
+        assert_eq!(layout.left, [Some(WindowButton::Close), Some(WindowButton::Minimize), None]);
         assert_eq!(layout.right, [Some(WindowButton::Maximize), None, None]);
     }
 
     #[test]
     fn test_window_button_layout_parse_deduplicates_same_side_buttons() {
         let layout = WindowButtonLayout::parse("close,close,minimize").unwrap();
-        assert_eq!(
-            layout.right,
-            [
-                Some(WindowButton::Close),
-                Some(WindowButton::Minimize),
-                None
-            ]
-        );
+        assert_eq!(layout.right, [Some(WindowButton::Close), Some(WindowButton::Minimize), None]);
         assert_eq!(layout.format(), ":close,minimize");
     }
 
@@ -2845,20 +2797,11 @@ mod tests {
         assert_eq!(layout.left, [Some(WindowButton::Close), None, None]);
         assert_eq!(
             layout.right,
-            [
-                Some(WindowButton::Maximize),
-                Some(WindowButton::Minimize),
-                None
-            ]
+            [Some(WindowButton::Maximize), Some(WindowButton::Minimize), None]
         );
 
-        let button_ids: Vec<_> = layout
-            .left
-            .iter()
-            .chain(layout.right.iter())
-            .flatten()
-            .map(WindowButton::id)
-            .collect();
+        let button_ids: Vec<_> =
+            layout.left.iter().chain(layout.right.iter()).flatten().map(WindowButton::id).collect();
         let unique_button_ids = button_ids.iter().copied().collect::<HashSet<_>>();
         assert_eq!(unique_button_ids.len(), button_ids.len());
         assert_eq!(layout.format(), "close:maximize,minimize");
@@ -2901,11 +2844,7 @@ mod tests {
         assert_eq!(layout.left, [None, None, None]);
         assert_eq!(
             layout.right,
-            [
-                Some(WindowButton::Minimize),
-                Some(WindowButton::Maximize),
-                Some(WindowButton::Close)
-            ]
+            [Some(WindowButton::Minimize), Some(WindowButton::Maximize), Some(WindowButton::Close)]
         );
 
         let round_tripped = WindowButtonLayout::parse(&layout.format()).unwrap();

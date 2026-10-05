@@ -15,13 +15,16 @@ fn device_size_to_etagere(size: Size<DevicePixels>) -> etagere::Size {
 }
 
 fn etagere_point_to_device(point: etagere::Point) -> Point<DevicePixels> {
-    Point {
-        x: DevicePixels(point.x),
-        y: DevicePixels(point.y),
-    }
+    Point { x: DevicePixels(point.x), y: DevicePixels(point.y) }
 }
 
 pub struct WgpuAtlas(Mutex<WgpuAtlasState>);
+#[cfg(not(target_family = "wasm"))]
+use crate::native_background_shader::{NativeShader, PreparedShader, ShaderDevice};
+#[cfg(not(target_family = "wasm"))]
+use crate::native_stream_image::{NativeStream, PreparedStream, StreamDevice};
+#[cfg(not(target_family = "wasm"))]
+const STREAM_TEXTURE_BIT: u32 = 0x8000_0000;
 
 struct PendingUpload {
     id: AtlasTextureId,
@@ -37,6 +40,20 @@ struct WgpuAtlasState {
     storage: WgpuAtlasStorage,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
     pending_uploads: Vec<PendingUpload>,
+    #[cfg(not(target_family = "wasm"))]
+    streams: FxHashMap<u64, NativeShader>,
+    #[cfg(not(target_family = "wasm"))]
+    images: FxHashMap<u64, NativeStream>,
+    #[cfg(not(target_family = "wasm"))]
+    stream_device: Option<StreamDevice>,
+    #[cfg(not(target_family = "wasm"))]
+    shader_device: Option<ShaderDevice>,
+    #[cfg(not(target_family = "wasm"))]
+    shader_lost: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(not(target_family = "wasm"))]
+    owning_thread: std::thread::ThreadId,
+    #[cfg(not(target_family = "wasm"))]
+    background_preparation_supported: bool,
 }
 
 pub struct WgpuTextureInfo {
@@ -58,15 +75,40 @@ impl WgpuAtlas {
             storage: WgpuAtlasStorage::default(),
             tiles_by_key: Default::default(),
             pending_uploads: Vec::new(),
+            #[cfg(not(target_family = "wasm"))]
+            streams: Default::default(),
+            #[cfg(not(target_family = "wasm"))]
+            images: Default::default(),
+            #[cfg(not(target_family = "wasm"))]
+            stream_device: None,
+            #[cfg(not(target_family = "wasm"))]
+            shader_device: None,
+            #[cfg(not(target_family = "wasm"))]
+            shader_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(not(target_family = "wasm"))]
+            owning_thread: std::thread::current().id(),
+            #[cfg(not(target_family = "wasm"))]
+            background_preparation_supported: false,
         }))
     }
 
     pub fn from_context(context: &WgpuContext) -> Self {
-        Self::new(
+        let atlas = Self::new(
             context.device.clone(),
             context.queue.clone(),
             context.color_texture_format(),
-        )
+        );
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let mut state = atlas.0.lock();
+            state.shader_lost = context.device_lost_flag();
+            // WSL Mesa/D3D12 GL cancellation segfaulted during actual lifetime
+            // qualification. The ordinary renderer stays available; background
+            // device factories need independent acceptance before enabling GL.
+            state.background_preparation_supported =
+                matches!(context.backend(), crate::WgpuBackend::Native(wgpu::Backend::Vulkan));
+        }
+        atlas
     }
 
     pub fn before_frame(&self) {
@@ -74,11 +116,64 @@ impl WgpuAtlas {
         lock.flush_uploads();
     }
 
-    pub fn get_texture_info(&self, id: AtlasTextureId) -> WgpuTextureInfo {
+    pub(crate) fn close_background_device(&self) {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let mut state = self.0.lock();
+            state.background_preparation_supported = false;
+            if let Some(device) = state.stream_device.take() {
+                if let Err(error) = device.invalidate() {
+                    log::error!("stream device close: {error:#}");
+                }
+            }
+            if let Some(device) = state.shader_device.take() {
+                if let Err(error) = device.invalidate() {
+                    log::error!("background device close: {error:#}");
+                }
+            }
+            // Drop schedules acknowledged retirement; it never waits on this thread.
+            state.streams.clear();
+            state.images.clear();
+        }
+    }
+
+    pub fn get_texture_info(&self, id: AtlasTextureId) -> Result<WgpuTextureInfo> {
         let lock = self.0.lock();
+        #[cfg(not(target_family = "wasm"))]
+        if id.kind == AtlasTextureKind::Polychrome && id.index & STREAM_TEXTURE_BIT != 0 {
+            if let Some(image) = lock.images.get(&u64::from(id.index & !STREAM_TEXTURE_BIT)) {
+                return Ok(WgpuTextureInfo { view: image.view() });
+            }
+            let image = lock
+                .streams
+                .get(&u64::from(id.index & !STREAM_TEXTURE_BIT))
+                .ok_or_else(|| anyhow::anyhow!("retired stream texture"))?;
+            return Ok(WgpuTextureInfo { view: image.view() });
+        }
         let texture = &lock.storage[id];
-        WgpuTextureInfo {
-            view: texture.view.clone(),
+        Ok(WgpuTextureInfo { view: texture.view.clone() })
+    }
+
+    pub(crate) fn note_stream_submission(&self, scene: &gpui::Scene, index: wgpu::SubmissionIndex) {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let mut state = self.0.lock();
+            for sprite in &scene.polychrome_sprites {
+                if sprite.tile.texture_id.index & STREAM_TEXTURE_BIT == 0 {
+                    continue;
+                }
+                let id = u64::from(sprite.tile.texture_id.index & !STREAM_TEXTURE_BIT);
+                if let Some(image) = state.images.get_mut(&id) {
+                    image.note_scene_submission(index.clone());
+                }
+                if let Some(image) = state.streams.get_mut(&id) {
+                    image.note_scene_submission(index.clone());
+                }
+            }
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _unused = (scene, index);
         }
     }
 
@@ -95,9 +190,28 @@ impl WgpuAtlas {
     /// The atlas will lazily recreate textures as needed on subsequent frames.
     pub fn handle_device_lost(&self, context: &WgpuContext) {
         let mut lock = self.0.lock();
+        #[cfg(not(target_family = "wasm"))]
+        {
+            if let Some(device) = lock.shader_device.take() {
+                if let Err(error) = device.invalidate() {
+                    log::error!("background device invalidation: {error:#}");
+                }
+            }
+            if let Some(device) = lock.stream_device.take() {
+                if let Err(error) = device.invalidate() {
+                    log::error!("stream device invalidation: {error:#}");
+                }
+            }
+            lock.images.clear();
+            lock.streams.clear();
+            lock.shader_lost = context.device_lost_flag();
+            lock.background_preparation_supported =
+                matches!(context.backend(), crate::WgpuBackend::Native(wgpu::Backend::Vulkan));
+        }
         lock.device = context.device.clone();
         lock.queue = context.queue.clone();
         lock.color_texture_format = context.color_texture_format();
+        lock.max_texture_size = context.device.limits().max_texture_dimension_2d;
         lock.storage = WgpuAtlasStorage::default();
         lock.tiles_by_key.clear();
         lock.pending_uploads.clear();
@@ -105,6 +219,238 @@ impl WgpuAtlas {
 }
 
 impl PlatformAtlas for WgpuAtlas {
+    #[cfg(not(target_family = "wasm"))]
+    fn stream_image_factory(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        size: Size<DevicePixels>,
+        cancellation: gpui::BackgroundShaderCancellation,
+    ) -> Result<Box<dyn FnOnce() -> Result<Option<gpui::PreparedStreamImage>> + Send>> {
+        let mut state = self.0.lock();
+        anyhow::ensure!(
+            state.background_preparation_supported,
+            "stream resource preparation is not qualified for this backend"
+        );
+        anyhow::ensure!(
+            std::thread::current().id() == state.owning_thread,
+            "stream factory capture must run on UI"
+        );
+        anyhow::ensure!(
+            !state.images.contains_key(&id.value()) && !state.streams.contains_key(&id.value()),
+            "stream owner already published"
+        );
+        if state.stream_device.is_none() {
+            state.stream_device = Some(StreamDevice::new(
+                state.device.clone(),
+                state.queue.clone(),
+                state.shader_lost.clone(),
+            ));
+        }
+        let device = state
+            .stream_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("stream device missing"))?
+            .clone();
+        let work = device.factory(
+            id.value(),
+            [size.width.0 as u32, size.height.0 as u32],
+            budgets.clone(),
+            cancellation,
+        )?;
+        Ok(Box::new(move || {
+            work.run()
+                .map(|prepared| prepared.map(|image| gpui::PreparedStreamImage::new(id, image)))
+        }))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn adopt_stream_image(
+        &self,
+        id: gpui::StreamImageId,
+        prepared: gpui::PreparedStreamImage,
+    ) -> Result<()> {
+        let prepared = prepared.into_native::<PreparedStream>(id)?;
+        let mut state = self.0.lock();
+        anyhow::ensure!(
+            !state.images.contains_key(&id.value()) && !state.streams.contains_key(&id.value()),
+            "stream owner already published"
+        );
+        let device = state
+            .stream_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("obsolete stream device"))?;
+        let image = device.adopt(id.value(), prepared)?;
+        state.images.insert(id.value(), image);
+        Ok(())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn stage_stream_image(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        frame: &gpui::StreamImageFrame<'_>,
+    ) -> Result<gpui::StreamImageUpdate> {
+        frame.validate()?;
+        budgets.ensure_available()?;
+        let mut state = self.0.lock();
+        let image = state
+            .images
+            .get_mut(&id.value())
+            .ok_or_else(|| anyhow::anyhow!("stream must be prepared before paint"))?;
+        let completion = image.stage(frame)?;
+        let tile = image.sequence().map(|_| AtlasTile {
+            texture_id: AtlasTextureId {
+                index: STREAM_TEXTURE_BIT | id.value() as u32,
+                kind: AtlasTextureKind::Polychrome,
+            },
+            tile_id: gpui::TileId(id.value() as u32),
+            padding: 0,
+            bounds: Bounds::new(gpui::point(DevicePixels(0), DevicePixels(0)), frame.size),
+        });
+        Ok(gpui::StreamImageUpdate {
+            tile,
+            sequence: image.sequence().unwrap_or(0),
+            completion: completion
+                .map(|receipt| gpui::StreamImageCompletion(Box::new(move || receipt.wait()))),
+        })
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn background_wgsl_factory(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        size: Size<DevicePixels>,
+        source: Arc<str>,
+        entry: Arc<str>,
+        cancellation: gpui::BackgroundShaderCancellation,
+    ) -> Result<Box<dyn FnOnce() -> Result<Option<gpui::PreparedBackgroundShader>> + Send>> {
+        let mut state = self.0.lock();
+        anyhow::ensure!(
+            state.background_preparation_supported,
+            "background shader preparation is not qualified for this backend"
+        );
+        anyhow::ensure!(
+            std::thread::current().id() == state.owning_thread,
+            "factory capture must run on its UI thread"
+        );
+        anyhow::ensure!(
+            !state.streams.contains_key(&id.value()) && !state.images.contains_key(&id.value()),
+            "owner already published"
+        );
+        if state.shader_device.is_none() {
+            state.shader_device = Some(ShaderDevice::new(
+                state.device.clone(),
+                state.queue.clone(),
+                state.shader_lost.clone(),
+            )?);
+        }
+        let device = state
+            .shader_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing shader device"))?
+            .clone();
+        let work = device.factory(
+            id.value(),
+            [size.width.0 as u32, size.height.0 as u32],
+            source,
+            entry,
+            state.color_texture_format,
+            budgets.clone(),
+            cancellation,
+        )?;
+        Ok(Box::new(move || {
+            work.run().map(|prepared| {
+                prepared.map(|prepared| gpui::PreparedBackgroundShader::new(id, prepared))
+            })
+        }))
+    }
+    #[cfg(not(target_family = "wasm"))]
+    fn adopt_background_shader(
+        &self,
+        id: gpui::StreamImageId,
+        prepared: gpui::PreparedBackgroundShader,
+    ) -> Result<()> {
+        let prepared = prepared.into_native::<PreparedShader>(id)?;
+        let mut state = self.0.lock();
+        anyhow::ensure!(
+            !state.streams.contains_key(&id.value()) && !state.images.contains_key(&id.value()),
+            "background owner already published"
+        );
+        let device = state
+            .shader_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("obsolete background device"))?;
+        let image = device.adopt(id.value(), prepared)?;
+        state.streams.insert(id.value(), image);
+        Ok(())
+    }
+    #[cfg(not(target_family = "wasm"))]
+    fn stage_background_wgsl(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        frame: &gpui::BackgroundWgslFrame<'_>,
+    ) -> Result<gpui::StreamImageUpdate> {
+        frame.validate()?;
+        budgets.ensure_available()?;
+        let mut state = self.0.lock();
+        let image = state
+            .streams
+            .get_mut(&id.value())
+            .ok_or_else(|| anyhow::anyhow!("background must be prepared before paint"))?;
+        let completion = image.stage(
+            frame.sequence,
+            [frame.size.width.0 as u32, frame.size.height.0 as u32],
+            frame.source,
+            frame.entry,
+        )?;
+        let tile = image.sequence().map(|_| AtlasTile {
+            texture_id: AtlasTextureId {
+                index: STREAM_TEXTURE_BIT | id.value() as u32,
+                kind: AtlasTextureKind::Polychrome,
+            },
+            tile_id: gpui::TileId(id.value() as u32),
+            padding: 0,
+            bounds: Bounds::new(gpui::point(DevicePixels(0), DevicePixels(0)), frame.size),
+        });
+        Ok(gpui::StreamImageUpdate {
+            tile,
+            sequence: image.sequence().unwrap_or(0),
+            completion: completion
+                .map(|completion| gpui::StreamImageCompletion(Box::new(move || completion.wait()))),
+        })
+    }
+    #[cfg(not(target_family = "wasm"))]
+    fn retire_stream_image(
+        &self,
+        id: gpui::StreamImageId,
+    ) -> Result<Option<gpui::StreamImageCompletion>> {
+        let mut state = self.0.lock();
+        if let Some(image) = state.images.remove(&id.value()) {
+            return Ok(image
+                .retire()
+                .map(|receipt| gpui::StreamImageCompletion(Box::new(move || receipt.wait()))));
+        }
+        Ok(state
+            .streams
+            .remove(&id.value())
+            .and_then(NativeShader::retire)
+            .map(|completion| gpui::StreamImageCompletion(Box::new(move || completion.wait()))))
+    }
+    #[cfg(not(target_family = "wasm"))]
+    fn invalidate_background_preparations_for_test(&self) -> Result<()> {
+        let state = self.0.lock();
+        anyhow::ensure!(state.streams.is_empty(), "injection requires no published streams");
+        state
+            .shader_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing background device"))?
+            .invalidate()
+    }
+
     fn get_or_insert_with<'a>(
         &self,
         key: &AtlasKey,
@@ -118,9 +464,7 @@ impl PlatformAtlas for WgpuAtlas {
             let Some((size, bytes)) = build()? else {
                 return Ok(None);
             };
-            let tile = lock
-                .allocate(size, key.texture_kind())
-                .context("failed to allocate")?;
+            let tile = lock.allocate(size, key.texture_kind()).context("failed to allocate")?;
             lock.upload_texture(tile.texture_id, tile.bounds, &bytes);
             lock.tiles_by_key.insert(key.clone(), tile);
             Ok(Some(tile))
@@ -143,11 +487,8 @@ impl PlatformAtlas for WgpuAtlas {
             texture.allocator.deallocate(tile.tile_id.into());
             texture.decrement_ref_count();
             if texture.is_unreferenced() {
-                lock.pending_uploads
-                    .retain(|upload| upload.id != texture.id);
-                lock.storage[id.kind]
-                    .free_list
-                    .push(texture.id.index as usize);
+                lock.pending_uploads.retain(|upload| upload.id != texture.id);
+                lock.storage[id.kind].free_list.push(texture.id.index as usize);
             } else {
                 *texture_slot = Some(texture);
             }
@@ -164,10 +505,7 @@ impl WgpuAtlasState {
         {
             let textures = &mut self.storage[texture_kind];
 
-            if let Some(tile) = textures
-                .iter_mut()
-                .rev()
-                .find_map(|texture| texture.allocate(size))
+            if let Some(tile) = textures.iter_mut().rev().find_map(|texture| texture.allocate(size))
             {
                 return Some(tile);
             }
@@ -182,15 +520,11 @@ impl WgpuAtlasState {
         min_size: Size<DevicePixels>,
         kind: AtlasTextureKind,
     ) -> &mut WgpuAtlasTexture {
-        const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
-            width: DevicePixels(1024),
-            height: DevicePixels(1024),
-        };
+        const DEFAULT_ATLAS_SIZE: Size<DevicePixels> =
+            Size { width: DevicePixels(1024), height: DevicePixels(1024) };
         let max_texture_size = self.max_texture_size as i32;
-        let max_atlas_size = Size {
-            width: DevicePixels(max_texture_size),
-            height: DevicePixels(max_texture_size),
-        };
+        let max_atlas_size =
+            Size { width: DevicePixels(max_texture_size), height: DevicePixels(max_texture_size) };
 
         let size = min_size.min(&max_atlas_size).max(&DEFAULT_ATLAS_SIZE);
         let format = match kind {
@@ -219,10 +553,7 @@ impl WgpuAtlasState {
         let index = texture_list.free_list.pop();
 
         let atlas_texture = WgpuAtlasTexture {
-            id: AtlasTextureId {
-                index: index.unwrap_or(texture_list.textures.len()) as u32,
-                kind,
-            },
+            id: AtlasTextureId { index: index.unwrap_or(texture_list.textures.len()) as u32, kind },
             allocator: BucketedAtlasAllocator::new(device_size_to_etagere(size)),
             format,
             texture,
@@ -232,18 +563,10 @@ impl WgpuAtlasState {
 
         if let Some(ix) = index {
             texture_list.textures[ix] = Some(atlas_texture);
-            texture_list
-                .textures
-                .get_mut(ix)
-                .and_then(|t| t.as_mut())
-                .expect("texture must exist")
+            texture_list.textures.get_mut(ix).and_then(|t| t.as_mut()).expect("texture must exist")
         } else {
             texture_list.textures.push(Some(atlas_texture));
-            texture_list
-                .textures
-                .last_mut()
-                .and_then(|t| t.as_mut())
-                .expect("texture must exist")
+            texture_list.textures.last_mut().and_then(|t| t.as_mut()).expect("texture must exist")
         }
     }
 
@@ -254,8 +577,7 @@ impl WgpuAtlasState {
             .map(|texture| swizzle_upload_data(bytes, texture.format))
             .unwrap_or_else(|| bytes.to_vec());
 
-        self.pending_uploads
-            .push(PendingUpload { id, bounds, data });
+        self.pending_uploads.push(PendingUpload { id, bounds, data });
     }
 
     fn flush_uploads(&mut self) {
@@ -322,10 +644,7 @@ impl ops::IndexMut<AtlasTextureKind> for WgpuAtlasStorage {
 
 impl WgpuAtlasStorage {
     fn get(&self, id: AtlasTextureId) -> Option<&WgpuAtlasTexture> {
-        self[id.kind]
-            .textures
-            .get(id.index as usize)
-            .and_then(|t| t.as_ref())
+        self[id.kind].textures.get(id.index as usize).and_then(|t| t.as_ref())
     }
 }
 
@@ -337,9 +656,7 @@ impl ops::Index<AtlasTextureId> for WgpuAtlasStorage {
             AtlasTextureKind::Subpixel => &self.subpixel_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
         };
-        textures[id.index as usize]
-            .as_ref()
-            .expect("texture must exist")
+        textures[id.index as usize].as_ref().expect("texture must exist")
     }
 }
 
@@ -359,10 +676,7 @@ impl WgpuAtlasTexture {
             texture_id: self.id,
             tile_id: allocation.id.into(),
             padding: 0,
-            bounds: Bounds {
-                origin: etagere_point_to_device(allocation.rectangle.min),
-                size,
-            },
+            bounds: Bounds { origin: etagere_point_to_device(allocation.rectangle.min), size },
         };
         self.live_atlas_keys += 1;
         Some(tile)
@@ -393,7 +707,7 @@ fn swizzle_upload_data(bytes: &[u8], format: wgpu::TextureFormat) -> Vec<u8> {
                 pixel.swap(0, 2);
             }
             data
-        }
+        },
         _ => bytes.to_vec(),
     }
 }
@@ -444,20 +758,12 @@ mod tests {
         let (device, queue) = test_device_and_queue()?;
 
         let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
-        let key = AtlasKey::Image(RenderImageParams {
-            image_id: ImageId(1),
-            frame_index: 0,
-        });
-        let size = Size {
-            width: DevicePixels(1),
-            height: DevicePixels(1),
-        };
+        let key = AtlasKey::Image(RenderImageParams { image_id: ImageId(1), frame_index: 0 });
+        let size = Size { width: DevicePixels(1), height: DevicePixels(1) };
         let mut build = || Ok(Some((size, Cow::Owned(vec![0, 0, 0, 255]))));
 
         // Regression test: before the fix, this panicked in flush_uploads
-        atlas
-            .get_or_insert_with(&key, &mut build)?
-            .expect("tile should be created");
+        atlas.get_or_insert_with(&key, &mut build)?.expect("tile should be created");
         atlas.remove(&key);
         atlas.before_frame();
         Ok(())
@@ -468,20 +774,11 @@ mod tests {
         let (device, queue) = test_device_and_queue()?;
         let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
 
-        let small = Size {
-            width: DevicePixels(64),
-            height: DevicePixels(64),
-        };
-        let big = Size {
-            width: DevicePixels(700),
-            height: DevicePixels(700),
-        };
+        let small = Size { width: DevicePixels(64), height: DevicePixels(64) };
+        let big = Size { width: DevicePixels(700), height: DevicePixels(700) };
 
         let make_key = |image_id: usize| {
-            AtlasKey::Image(RenderImageParams {
-                image_id: ImageId(image_id),
-                frame_index: 0,
-            })
+            AtlasKey::Image(RenderImageParams { image_id: ImageId(image_id), frame_index: 0 })
         };
         let insert = |key: &AtlasKey, size: Size<DevicePixels>| {
             let byte_count = (size.width.0 as usize) * (size.height.0 as usize) * 4;
@@ -510,10 +807,7 @@ mod tests {
     #[test]
     fn swizzle_upload_data_preserves_bgra_uploads() {
         let input = vec![0x10, 0x20, 0x30, 0x40];
-        assert_eq!(
-            swizzle_upload_data(&input, wgpu::TextureFormat::Bgra8Unorm),
-            input
-        );
+        assert_eq!(swizzle_upload_data(&input, wgpu::TextureFormat::Bgra8Unorm), input);
     }
 
     #[test]
