@@ -413,8 +413,24 @@ impl WgpuRenderer {
             );
         }
 
+        let mut surface_usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let copy_usage = wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST;
+            let supports_postprocess =
+                matches!(context.backend(), crate::WgpuBackend::Native(wgpu::Backend::Vulkan))
+                    && matches!(
+                        surface_format,
+                        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+                    )
+                    && surface_caps.usages.contains(copy_usage);
+            if supports_postprocess {
+                surface_usage |= copy_usage;
+            }
+            atlas.configure_postprocess(supports_postprocess.then_some(surface_format));
+        }
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: surface_usage,
             format: surface_format,
             width: clamped_width.max(1),
             height: clamped_height.max(1),
@@ -1379,7 +1395,7 @@ impl WgpuRenderer {
             );
         }
 
-        if let Err(error) = self.record_frame(scene, &frame_view) {
+        if let Err(error) = self.record_frame(scene, &frame.texture, &frame_view) {
             log::error!("{error:#}");
             self.resources().queue.submit(std::iter::empty());
             return false;
@@ -1389,7 +1405,12 @@ impl WgpuRenderer {
         true
     }
 
-    fn record_frame(&mut self, scene: &Scene, frame_view: &wgpu::TextureView) -> Result<()> {
+    fn record_frame(
+        &mut self,
+        scene: &Scene,
+        frame_texture: &wgpu::Texture,
+        frame_view: &wgpu::TextureView,
+    ) -> Result<()> {
         let mut instance_offset = 0;
         let instance_bindings = self
             .write_instances(scene, &mut instance_offset)
@@ -1515,6 +1536,39 @@ impl WgpuRenderer {
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {},
                     PrimitiveBatch::Postprocesses(range) => {
+                        #[cfg(not(target_family = "wasm"))]
+                        {
+                            drop(pass);
+                            // Queue 写入先于下一次 submit；先提交正文，避免同一效果的后续参数改写前次绘制。
+                            let index = self.resources().queue.submit([encoder.finish()]);
+                            self.atlas.note_stream_submission(scene, index);
+                            for effect in &scene.postprocesses[range] {
+                                if let Err(error) =
+                                    self.atlas.render_postprocess(frame_texture, effect)
+                                {
+                                    effect.feedback.record_error(error.to_string());
+                                }
+                            }
+                            encoder = self.resources().device.create_command_encoder(
+                                &wgpu::CommandEncoderDescriptor {
+                                    label: Some("scene after postprocess"),
+                                },
+                            );
+                            pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("main pass after postprocess"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: frame_view,
+                                    resolve_target: None,
+                                    depth_slice: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                ..Default::default()
+                            });
+                        }
+                        #[cfg(target_family = "wasm")]
                         for effect in &scene.postprocesses[range] {
                             effect.feedback.record_error(
                                 "surface post-processing is not available on this backend".into(),
@@ -1989,6 +2043,10 @@ impl WgpuRenderer {
         anyhow::ensure!(
             capabilities.formats.contains(&self.surface_config.format),
             "replacement surface does not support the existing renderer format"
+        );
+        anyhow::ensure!(
+            capabilities.usages.contains(self.surface_config.usage),
+            "replacement surface does not support the existing renderer usages"
         );
         log::info!(
             "replacement surface present modes: {:?}; requested {:?}",

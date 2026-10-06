@@ -289,6 +289,20 @@ impl StreamImageHandle {
     pub fn adopt_postprocess(&self, prepared: PreparedStreamImage) -> Result<()> {
         self.0.atlas.adopt_postprocess(self.0.id, prepared)
     }
+
+    /// Captures portable WGSL preparation under the existing compiler admission.
+    pub fn prepare_postprocess_wgsl(
+        &self,
+        descriptor: crate::WgslPostprocessDescriptor,
+        cancellation: BackgroundShaderCancellation,
+    ) -> Result<StreamImagePreparation> {
+        descriptor.validate()?;
+        let lease = self.0.budgets.reserve_preparation()?;
+        let work = self.0.atlas.postprocess_wgsl_factory(
+            self.0.id, &self.0.budgets, descriptor, cancellation,
+        )?;
+        Ok(StreamImagePreparation { work, _lease: lease })
+    }
     /// Captures a WGSL native factory; unsupported backends return an explicit error.
     pub fn prepare_background_wgsl(
         &self,

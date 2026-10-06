@@ -446,7 +446,7 @@ impl AdmittedResource for Resources {
     }
 }
 
-fn check_scopes(scopes: [wgpu::ErrorScopeGuard; 3]) -> Result<()> {
+pub(crate) fn check_scopes(scopes: [wgpu::ErrorScopeGuard; 3]) -> Result<()> {
     let errors: Vec<_> =
         scopes.into_iter().filter_map(|scope| pollster::block_on(scope.pop())).collect();
     ensure!(errors.is_empty(), "native WGSL preparation: {errors:?}");

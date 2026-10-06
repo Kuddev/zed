@@ -15,15 +15,7 @@ pub struct PostprocessDescriptor {
 impl PostprocessDescriptor {
     /// Bounds descriptor costs before a native factory allocates any resource.
     pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!(self.size.width.0 > 0 && self.size.height.0 > 0, "empty effect surface");
-        anyhow::ensure!(
-            (16..=16 * 1024).contains(&self.uniform_size) && self.uniform_size % 16 == 0,
-            "effect uniforms must contain 16-byte blocks within 16 KiB"
-        );
-        anyhow::ensure!(
-            (1..=8).contains(&self.directx_passes.len()),
-            "an effect requires between one and eight passes"
-        );
+        validate_layout(self.size, self.uniform_size, self.directx_passes.len())?;
         for code in self.directx_passes.iter() {
             anyhow::ensure!(
                 code.len() <= 64 * 1024 && code.starts_with(b"DXBC"),
@@ -36,14 +28,68 @@ impl PostprocessDescriptor {
 
     /// Exact reusable texture storage; never substitutes a lower text resolution.
     pub fn texture_bytes(&self) -> Result<u64> {
-        let width = u64::try_from(self.size.width.0)?;
-        let height = u64::try_from(self.size.height.0)?;
-        // 所有段交替使用两张纹理，最后复制回原区域；这样每段都使用局部像素坐标。
-        width
-            .checked_mul(height)
-            .and_then(|pixels| pixels.checked_mul(8))
-            .ok_or_else(|| anyhow::anyhow!("effect texture size overflow"))
+        texture_bytes(self.size)
     }
+}
+
+/// A complete WGSL module and one fragment entry; modules can be shared by several passes.
+#[derive(Clone)]
+pub struct WgslPostprocessPass {
+    pub source: Arc<str>,
+    pub entry: Arc<str>,
+}
+
+/// Portable source transport; it does not change the existing precompiled Direct3D path.
+#[derive(Clone)]
+pub struct WgslPostprocessDescriptor {
+    pub size: Size<DevicePixels>,
+    pub uniform_size: usize,
+    pub passes: Arc<[WgslPostprocessPass]>,
+}
+
+impl WgslPostprocessDescriptor {
+    pub fn validate(&self) -> Result<()> {
+        validate_layout(self.size, self.uniform_size, self.passes.len())?;
+        for pass in self.passes.iter() {
+            // 传输包含应用的 ABI 前缀，不能把用户文件的 64 KiB 上限误用于拼接后的模块。
+            anyhow::ensure!(
+                !pass.source.is_empty() && pass.source.len() <= 128 * 1024,
+                "invalid WGSL effect module size"
+            );
+            anyhow::ensure!(
+                !pass.entry.is_empty()
+                    && pass.entry.len() <= 256
+                    && !pass.entry.chars().any(char::is_control),
+                "invalid WGSL effect entry"
+            );
+        }
+        self.texture_bytes()?;
+        Ok(())
+    }
+
+    pub fn texture_bytes(&self) -> Result<u64> {
+        texture_bytes(self.size)
+    }
+}
+
+fn validate_layout(size: Size<DevicePixels>, uniform_size: usize, passes: usize) -> Result<()> {
+    anyhow::ensure!(size.width.0 > 0 && size.height.0 > 0, "empty effect surface");
+    anyhow::ensure!(
+        (16..=16 * 1024).contains(&uniform_size) && uniform_size % 16 == 0,
+        "effect uniforms must contain 16-byte blocks within 16 KiB"
+    );
+    anyhow::ensure!((1..=8).contains(&passes), "an effect requires between one and eight passes");
+    Ok(())
+}
+
+fn texture_bytes(size: Size<DevicePixels>) -> Result<u64> {
+    let width = u64::try_from(size.width.0)?;
+    let height = u64::try_from(size.height.0)?;
+    // 所有段交替使用两张纹理，最后复制回原区域；这样每段都使用局部像素坐标。
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(8))
+        .ok_or_else(|| anyhow::anyhow!("effect texture size overflow"))
 }
 
 /// A render failure belongs to its effect owner, not to unrelated window content.
@@ -121,5 +167,26 @@ mod tests {
         feedback.record_error("later".into());
         assert_eq!(feedback.take_error().as_deref(), Some("first"));
         assert!(feedback.take_error().is_none());
+    }
+
+    #[test]
+    fn wgsl_transport_uses_the_same_surface_and_pass_limits() {
+        let mut value = WgslPostprocessDescriptor {
+            size: size(DevicePixels(4), DevicePixels(2)),
+            uniform_size: 16,
+            passes: vec![WgslPostprocessPass { source: "module".into(), entry: "main".into() }].into(),
+        };
+        assert!(value.validate().is_ok());
+        assert_eq!(value.texture_bytes().unwrap(), 64);
+        let pass = value.passes[0].clone();
+        value.passes = vec![pass.clone(); 8].into();
+        assert!(value.validate().is_ok());
+        assert_eq!(value.texture_bytes().unwrap(), 64);
+        value.passes = vec![pass; 9].into();
+        assert!(value.validate().is_err());
+        value.passes = vec![WgslPostprocessPass { source: "module".into(), entry: "".into() }].into();
+        assert!(value.validate().is_err());
+        value.passes = vec![WgslPostprocessPass { source: " ".repeat(128 * 1024 + 1).into(), entry: "main".into() }].into();
+        assert!(value.validate().is_err());
     }
 }

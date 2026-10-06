@@ -22,6 +22,8 @@ pub struct WgpuAtlas(Mutex<WgpuAtlasState>);
 #[cfg(not(target_family = "wasm"))]
 use crate::native_background_shader::{NativeShader, PreparedShader, ShaderDevice};
 #[cfg(not(target_family = "wasm"))]
+use crate::native_postprocess::{NativePostprocess, PostprocessDevice, PreparedPostprocess};
+#[cfg(not(target_family = "wasm"))]
 use crate::native_stream_image::{NativeStream, PreparedStream, StreamDevice};
 #[cfg(not(target_family = "wasm"))]
 const STREAM_TEXTURE_BIT: u32 = 0x8000_0000;
@@ -54,6 +56,12 @@ struct WgpuAtlasState {
     owning_thread: std::thread::ThreadId,
     #[cfg(not(target_family = "wasm"))]
     background_preparation_supported: bool,
+    #[cfg(not(target_family = "wasm"))]
+    postprocess_format: Option<wgpu::TextureFormat>,
+    #[cfg(not(target_family = "wasm"))]
+    postprocess_device: Option<PostprocessDevice>,
+    #[cfg(not(target_family = "wasm"))]
+    postprocesses: FxHashMap<u64, NativePostprocess>,
 }
 
 pub struct WgpuTextureInfo {
@@ -89,6 +97,12 @@ impl WgpuAtlas {
             owning_thread: std::thread::current().id(),
             #[cfg(not(target_family = "wasm"))]
             background_preparation_supported: false,
+            #[cfg(not(target_family = "wasm"))]
+            postprocess_format: None,
+            #[cfg(not(target_family = "wasm"))]
+            postprocess_device: None,
+            #[cfg(not(target_family = "wasm"))]
+            postprocesses: Default::default(),
         }))
     }
 
@@ -116,11 +130,40 @@ impl WgpuAtlas {
         lock.flush_uploads();
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn configure_postprocess(&self, format: Option<wgpu::TextureFormat>) {
+        self.0.lock().postprocess_format = format;
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn render_postprocess(
+        &self,
+        screen: &wgpu::Texture,
+        effect: &gpui::PaintPostprocess,
+    ) -> Result<()> {
+        let mut state = self.0.lock();
+        anyhow::ensure!(
+            state.postprocess_format == Some(screen.format()),
+            "surface post-processing is not available for this surface"
+        );
+        let image = state
+            .postprocesses
+            .get_mut(&effect.owner.id().value())
+            .ok_or_else(|| anyhow::anyhow!("effect owner is not prepared"))?;
+        image.render(screen, effect.bounds, effect.content_mask.bounds, &effect.uniforms)
+    }
+
     pub(crate) fn close_background_device(&self) {
         #[cfg(not(target_family = "wasm"))]
         {
             let mut state = self.0.lock();
             state.background_preparation_supported = false;
+            state.postprocess_format = None;
+            if let Some(device) = state.postprocess_device.take() {
+                if let Err(error) = device.invalidate() {
+                    log::error!("postprocess device close: {error:#}");
+                }
+            }
             if let Some(device) = state.stream_device.take() {
                 if let Err(error) = device.invalidate() {
                     log::error!("stream device close: {error:#}");
@@ -134,6 +177,7 @@ impl WgpuAtlas {
             // Drop schedules acknowledged retirement; it never waits on this thread.
             state.streams.clear();
             state.images.clear();
+            state.postprocesses.clear();
         }
     }
 
@@ -192,6 +236,13 @@ impl WgpuAtlas {
         let mut lock = self.0.lock();
         #[cfg(not(target_family = "wasm"))]
         {
+            lock.postprocess_format = None;
+            if let Some(device) = lock.postprocess_device.take() {
+                if let Err(error) = device.invalidate() {
+                    log::error!("postprocess device invalidation: {error:#}");
+                }
+            }
+            lock.postprocesses.clear();
             if let Some(device) = lock.shader_device.take() {
                 if let Err(error) = device.invalidate() {
                     log::error!("background device invalidation: {error:#}");
@@ -220,6 +271,71 @@ impl WgpuAtlas {
 
 impl PlatformAtlas for WgpuAtlas {
     #[cfg(not(target_family = "wasm"))]
+    fn postprocess_wgsl_factory(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        descriptor: gpui::WgslPostprocessDescriptor,
+        cancellation: gpui::BackgroundShaderCancellation,
+    ) -> Result<Box<dyn FnOnce() -> Result<Option<gpui::PreparedStreamImage>> + Send>> {
+        let mut state = self.0.lock();
+        anyhow::ensure!(
+            state.background_preparation_supported,
+            "postprocess preparation is not qualified for this backend"
+        );
+        let format = state
+            .postprocess_format
+            .ok_or_else(|| anyhow::anyhow!("surface does not support scoped copies"))?;
+        anyhow::ensure!(
+            std::thread::current().id() == state.owning_thread,
+            "postprocess factory capture must run on UI"
+        );
+        anyhow::ensure!(
+            !state.postprocesses.contains_key(&id.value())
+                && !state.streams.contains_key(&id.value())
+                && !state.images.contains_key(&id.value()),
+            "postprocess owner already published"
+        );
+        if state.postprocess_device.is_none() {
+            state.postprocess_device = Some(PostprocessDevice::new(
+                state.device.clone(),
+                state.queue.clone(),
+                state.shader_lost.clone(),
+            )?);
+        }
+        let device = state
+            .postprocess_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("postprocess device missing"))?;
+        let work = device.factory(id.value(), descriptor, format, budgets.clone(), cancellation)?;
+        Ok(Box::new(move || {
+            work.run().map(|image| image.map(|image| gpui::PreparedStreamImage::new(id, image)))
+        }))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn adopt_postprocess(
+        &self,
+        id: gpui::StreamImageId,
+        prepared: gpui::PreparedStreamImage,
+    ) -> Result<()> {
+        let prepared = prepared.into_native::<PreparedPostprocess>(id)?;
+        let mut state = self.0.lock();
+        anyhow::ensure!(
+            !state.postprocesses.contains_key(&id.value())
+                && !state.streams.contains_key(&id.value())
+                && !state.images.contains_key(&id.value()),
+            "postprocess owner already published"
+        );
+        let device = state
+            .postprocess_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("obsolete postprocess device"))?;
+        let image = device.adopt(id.value(), prepared)?;
+        state.postprocesses.insert(id.value(), image);
+        Ok(())
+    }
+    #[cfg(not(target_family = "wasm"))]
     fn stream_image_factory(
         &self,
         id: gpui::StreamImageId,
@@ -237,7 +353,9 @@ impl PlatformAtlas for WgpuAtlas {
             "stream factory capture must run on UI"
         );
         anyhow::ensure!(
-            !state.images.contains_key(&id.value()) && !state.streams.contains_key(&id.value()),
+            !state.images.contains_key(&id.value())
+                && !state.streams.contains_key(&id.value())
+                && !state.postprocesses.contains_key(&id.value()),
             "stream owner already published"
         );
         if state.stream_device.is_none() {
@@ -273,7 +391,9 @@ impl PlatformAtlas for WgpuAtlas {
         let prepared = prepared.into_native::<PreparedStream>(id)?;
         let mut state = self.0.lock();
         anyhow::ensure!(
-            !state.images.contains_key(&id.value()) && !state.streams.contains_key(&id.value()),
+            !state.images.contains_key(&id.value())
+                && !state.streams.contains_key(&id.value())
+                && !state.postprocesses.contains_key(&id.value()),
             "stream owner already published"
         );
         let device = state
@@ -337,7 +457,9 @@ impl PlatformAtlas for WgpuAtlas {
             "factory capture must run on its UI thread"
         );
         anyhow::ensure!(
-            !state.streams.contains_key(&id.value()) && !state.images.contains_key(&id.value()),
+            !state.streams.contains_key(&id.value())
+                && !state.images.contains_key(&id.value())
+                && !state.postprocesses.contains_key(&id.value()),
             "owner already published"
         );
         if state.shader_device.is_none() {
@@ -376,7 +498,9 @@ impl PlatformAtlas for WgpuAtlas {
         let prepared = prepared.into_native::<PreparedShader>(id)?;
         let mut state = self.0.lock();
         anyhow::ensure!(
-            !state.streams.contains_key(&id.value()) && !state.images.contains_key(&id.value()),
+            !state.streams.contains_key(&id.value())
+                && !state.images.contains_key(&id.value())
+                && !state.postprocesses.contains_key(&id.value()),
             "background owner already published"
         );
         let device = state
@@ -429,6 +553,11 @@ impl PlatformAtlas for WgpuAtlas {
         id: gpui::StreamImageId,
     ) -> Result<Option<gpui::StreamImageCompletion>> {
         let mut state = self.0.lock();
+        if let Some(image) = state.postprocesses.remove(&id.value()) {
+            return Ok(image
+                .retire()
+                .map(|receipt| gpui::StreamImageCompletion(Box::new(move || receipt.wait()))));
+        }
         if let Some(image) = state.images.remove(&id.value()) {
             return Ok(image
                 .retire()

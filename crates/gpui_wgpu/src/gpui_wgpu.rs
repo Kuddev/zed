@@ -3,10 +3,15 @@ mod native_background_shader;
 #[cfg(not(target_family = "wasm"))]
 mod native_gpu_completion;
 #[cfg(not(target_family = "wasm"))]
+mod native_postprocess;
+#[cfg(not(target_family = "wasm"))]
 mod native_stream_image;
 #[cfg(not(target_family = "wasm"))]
 mod stream_contract {
-    pub use gpui::{BackgroundShaderCancellation, StreamImageBudgets, StreamImageLease};
+    pub use gpui::{
+        BackgroundShaderCancellation, StreamImageBudgets, StreamImageLease,
+        WgslPostprocessDescriptor,
+    };
 }
 mod cosmic_text_system;
 mod surface_change;

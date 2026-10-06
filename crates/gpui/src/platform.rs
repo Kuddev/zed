@@ -1352,6 +1352,16 @@ pub trait PlatformAtlas {
         anyhow::bail!("surface post-processing is unsupported on this renderer")
     }
 
+    fn postprocess_wgsl_factory(
+        &self,
+        _id: crate::StreamImageId,
+        _budgets: &crate::StreamImageBudgets,
+        _descriptor: crate::WgslPostprocessDescriptor,
+        _cancellation: crate::BackgroundShaderCancellation,
+    ) -> Result<Box<dyn FnOnce() -> Result<Option<crate::PreparedStreamImage>> + Send>> {
+        anyhow::bail!("WGSL surface post-processing is unsupported on this renderer")
+    }
+
     fn invalidate_background_preparations_for_test(&self) -> Result<()> {
         anyhow::bail!("background preparation fault injection is unsupported")
     }
