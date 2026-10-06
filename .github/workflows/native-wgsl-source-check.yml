@@ -26,6 +26,9 @@ jobs:
     timeout-minutes: 50
     env:
       RUSTUP_TOOLCHAIN: 1.97.1
+      CARGO_HOME: D:\c
+      CARGO_TARGET_DIR: D:\native-target
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
@@ -37,6 +40,9 @@ jobs:
       - name: Install the pinned compiler
         shell: pwsh
         run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
+      - name: Support long dependency paths on the ephemeral runner
+        shell: pwsh
+        run: git config --global core.longpaths true
       - name: Check complete native renderer sources
         shell: pwsh
         run: cargo check --locked -p gpui -p gpui_wgpu -p gpui_windows --lib
