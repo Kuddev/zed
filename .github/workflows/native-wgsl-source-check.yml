@@ -1,0 +1,53 @@
+name: Native WGSL source check
+
+on:
+  push:
+    branches: [wip/wgsl-native-postprocess-20261006]
+    paths:
+      - .github/workflows/native-wgsl-source-check.yml
+      - crates/gpui/**
+      - crates/gpui_wgpu/**
+      - crates/gpui_windows/**
+      - Cargo.toml
+      - Cargo.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-wgsl-source-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-source:
+    if: github.repository == 'Kuddev/zed'
+    runs-on: windows-2022
+    timeout-minutes: 50
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - name: Install the pinned compiler
+        shell: pwsh
+        run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
+      - name: Check complete native renderer sources
+        shell: pwsh
+        run: cargo check --locked -p gpui -p gpui_wgpu -p gpui_windows --lib
+      - name: Record qualification scope
+        if: always()
+        shell: pwsh
+        run: |
+          @"
+          Source revision: $env:GITHUB_SHA
+
+          This job compiles the complete common, WGPU, and Windows renderer sources.
+          It does not execute the hardware Vulkan pixel fixture, exercise a window,
+          qualify Metal, or change the application's pinned dependencies.
+          "@ >> $env:GITHUB_STEP_SUMMARY
