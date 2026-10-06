@@ -299,7 +299,10 @@ impl StreamImageHandle {
         descriptor.validate()?;
         let lease = self.0.budgets.reserve_preparation()?;
         let work = self.0.atlas.postprocess_wgsl_factory(
-            self.0.id, &self.0.budgets, descriptor, cancellation,
+            self.0.id,
+            &self.0.budgets,
+            descriptor,
+            cancellation,
         )?;
         Ok(StreamImagePreparation { work, _lease: lease })
     }

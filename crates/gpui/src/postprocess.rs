@@ -174,7 +174,8 @@ mod tests {
         let mut value = WgslPostprocessDescriptor {
             size: size(DevicePixels(4), DevicePixels(2)),
             uniform_size: 16,
-            passes: vec![WgslPostprocessPass { source: "module".into(), entry: "main".into() }].into(),
+            passes: vec![WgslPostprocessPass { source: "module".into(), entry: "main".into() }]
+                .into(),
         };
         assert!(value.validate().is_ok());
         assert_eq!(value.texture_bytes().unwrap(), 64);
@@ -184,9 +185,14 @@ mod tests {
         assert_eq!(value.texture_bytes().unwrap(), 64);
         value.passes = vec![pass; 9].into();
         assert!(value.validate().is_err());
-        value.passes = vec![WgslPostprocessPass { source: "module".into(), entry: "".into() }].into();
+        value.passes =
+            vec![WgslPostprocessPass { source: "module".into(), entry: "".into() }].into();
         assert!(value.validate().is_err());
-        value.passes = vec![WgslPostprocessPass { source: " ".repeat(128 * 1024 + 1).into(), entry: "main".into() }].into();
+        value.passes = vec![WgslPostprocessPass {
+            source: " ".repeat(128 * 1024 + 1).into(),
+            entry: "main".into(),
+        }]
+        .into();
         assert!(value.validate().is_err());
     }
 }
