@@ -644,3 +644,6 @@ fn validate_fragment(source: &str, entry: &str, uniform_size: usize) -> Result<n
     .validate(&module)?;
     Ok(module)
 }
+
+#[cfg(test)]
+mod tests;

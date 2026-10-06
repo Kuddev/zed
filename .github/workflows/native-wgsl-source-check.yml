@@ -32,6 +32,8 @@ jobs:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: '0'
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -46,6 +48,35 @@ jobs:
       - name: Check complete native renderer sources
         shell: pwsh
         run: cargo check --locked -p gpui -p gpui_wgpu -p gpui_windows --lib
+      - name: Build the hardware acceptance executable without running it
+        id: hardware-fixture
+        shell: pwsh
+        run: |
+          cargo test --locked -p gpui_wgpu --lib --no-run --message-format=json |
+            Tee-Object -FilePath "$env:RUNNER_TEMP/native-test-build.jsonl"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $artifacts = @(Get-Content "$env:RUNNER_TEMP/native-test-build.jsonl" |
+            ForEach-Object { $_ | ConvertFrom-Json } |
+            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'gpui_wgpu' -and $_.profile.test -and $_.executable })
+          if ($artifacts.Count -ne 1) { throw 'Expected exactly one native test executable' }
+          $out = Join-Path $env:RUNNER_TEMP 'native-wgsl-hardware'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          Copy-Item -LiteralPath $artifacts[0].executable -Destination "$out/native-postprocess-tests.exe"
+          @{
+            source_revision = $env:GITHUB_SHA
+            executable_sha256 = (Get-FileHash "$out/native-postprocess-tests.exe" -Algorithm SHA256).Hash
+            hardware_execution = 'not run'
+            test_filter = 'native_postprocess::tests::native_vulkan_postprocess_contract'
+            abi_input = 'PEBREL_EFFECT_ABI must point to the actual UTF-8 product ABI file'
+          } | ConvertTo-Json | Set-Content -Encoding utf8 "$out/manifest.json"
+          "directory=$out" >> $env:GITHUB_OUTPUT
+      - name: Retain the executable for physical GPU acceptance
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-wgsl-hardware-${{ github.sha }}
+          path: ${{ steps.hardware-fixture.outputs.directory }}
+          if-no-files-found: error
+          retention-days: 7
       - name: Record qualification scope
         if: always()
         shell: pwsh
@@ -54,6 +85,7 @@ jobs:
           Source revision: $env:GITHUB_SHA
 
           This job compiles the complete common, WGPU, and Windows renderer sources.
+          It also builds, but does not run, the explicit hardware acceptance test.
           It does not execute the hardware Vulkan pixel fixture, exercise a window,
           qualify Metal, or change the application's pinned dependencies.
           "@ >> $env:GITHUB_STEP_SUMMARY
