@@ -62,6 +62,20 @@ Integrated scene/surface execution, the expanded BGRA/application-ABI fixture,
 and other-platform acceptance remain pending. Source compilation is not hardware
 or window execution and does not complete backend qualification.
 
+The expanded fixture now lives in `native_postprocess/tests.rs`, using the real
+crate types and implementation; the local standalone launcher reuses this module.
+It is explicitly ignored in ordinary test runs because execution requires a
+hardware Vulkan adapter and the product's actual UTF-8 ABI file through
+`PEBREL_EFFECT_ABI`. Its ignored status is not a passing hardware result.
+
+At `f62c414139da6f47ae18023e5cf85e316d1339c3`,
+[run 37501147011](https://github.com/Kuddev/zed/actions/runs/37501147011) passed
+complete source checking and `cargo test --locked -p gpui_wgpu --lib --no-run`.
+The retained executable and manifest record the source revision and SHA256.
+This removes the need to compile the fixture on the physical acceptance machine;
+the RGBA/BGRA, eight-pass, clipping, ABI, cancellation, and retirement assertions
+still require explicit execution there.
+
 ## Supersedes
 
 None. Extends the existing scoped primitive without changing its Direct3D contract.
