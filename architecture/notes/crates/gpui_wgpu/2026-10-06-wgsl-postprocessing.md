@@ -3,8 +3,9 @@
 ## Status
 
 Work in progress. The native executor has hardware Vulkan pixel and lifetime
-evidence. The complete renderer integration has not yet passed compilation or
-window acceptance. Product dependencies still pin the preceding validated revision.
+evidence. Complete common, WGPU, and Windows renderer source checks pass on
+Windows MSVC; integrated window acceptance remains pending. Product dependencies
+still pin the preceding validated revision.
 
 ## Context
 
@@ -49,8 +50,17 @@ A native Vulkan fixture imports the actual common descriptor and native executor
 It verifies ordered pixels, untouched outside regions, excluded-input transparency,
 independent consecutive uniform updates, eight-stage constant texture admission,
 insufficient budget, cancellation, obsolete epochs and acknowledged retirement.
-Full source compilation, scene/surface dispatch, application ABI and other-platform
-acceptance remain pending; this is not a completed backend qualification.
+The Windows MSVC source check at revision
+`067d5225d6e701fc6d6804a207fd738d6f6ac5a0` passed with Rust 1.97.1:
+`cargo check --locked -p gpui -p gpui_wgpu -p gpui_windows --lib`.
+Evidence: [native source run](https://github.com/Kuddev/zed/actions/runs/37496042949).
+The qualification branch uses a hosted runner because inherited CI requires
+upstream-only infrastructure. A short Cargo home and Git long-path support avoid
+a dependency checkout failure without changing dependencies or the lockfile.
+
+Integrated scene/surface execution, the expanded BGRA/application-ABI fixture,
+and other-platform acceptance remain pending. Source compilation is not hardware
+or window execution and does not complete backend qualification.
 
 ## Supersedes
 
