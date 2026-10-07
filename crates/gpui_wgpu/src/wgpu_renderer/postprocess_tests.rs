@@ -195,6 +195,24 @@ fn render_and_read(renderer: &mut WgpuRenderer, scene: &Scene) -> Vec<[u8; 4]> {
     pixels
 }
 
+fn assert_scaled_pixel(pixel: &[u8; 4], lower_red: u8) {
+    // Vulkan 的 UNORM 转换允许相邻整数：0.5 * 255 为 127/128，0.25 为 63/64。
+    // 只放宽这个量化通道；0/1 端点、alpha、遮罩外区域和后绘制图元仍逐字节检查。
+    assert!((lower_red..=lower_red + 1).contains(&pixel[0]), "scaled red: {pixel:?}");
+    assert_eq!(&pixel[1..], &[255, 0, 255]);
+}
+
+fn assert_scene_pixels(actual: &[[u8; 4]], expected: &[[u8; 4]]) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, (pixel, expected)) in actual.iter().zip(expected).enumerate() {
+        if *expected == [128, 255, 0, 255] {
+            assert_scaled_pixel(pixel, 127);
+        } else {
+            assert_eq!(pixel, expected, "scene pixel {index}");
+        }
+    }
+}
+
 #[test]
 #[ignore = "requires hardware Vulkan; constructs a hidden non-activating native window"]
 fn native_surface_scene_order_and_replay() {
@@ -268,19 +286,19 @@ fn native_surface_scene_order_and_replay() {
             }
         })
         .collect::<Vec<_>>();
-    assert_eq!(render_and_read(&mut renderer, &scene), expected);
+    assert_scene_pixels(&render_and_read(&mut renderer, &scene), &expected);
     let mut replay = Scene::default();
     replay.replay(0..scene.len(), &scene);
     replay.finish();
-    assert_eq!(render_and_read(&mut renderer, &replay), expected);
+    assert_scene_pixels(&render_and_read(&mut renderer, &replay), &expected);
     let mut repeated = Scene::default();
     repeated.insert_primitive(quad(full, 0x0000ff));
     repeated.insert_primitive(effect(&owner, region(0., 0., 4., 2.), full, 0.5));
     repeated.insert_primitive(effect(&owner, region(6., 0., 4., 2.), full, 0.25));
     repeated.finish();
     let pixels = render_and_read(&mut renderer, &repeated);
-    assert_eq!(pixels[0], [128, 255, 0, 255]);
-    assert_eq!(pixels[6], [64, 255, 0, 255]);
+    assert_scaled_pixel(&pixels[0], 127);
+    assert_scaled_pixel(&pixels[6], 63);
     // 显式完成原生退役后再释放模拟 executor 的句柄，不在模拟 UI 线程等待 GPU。
     let receipt = renderer.atlas.retire_stream_image(owner.id()).unwrap().unwrap();
     std::thread::spawn(move || receipt.wait()).join().unwrap().unwrap();
