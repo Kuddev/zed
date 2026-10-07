@@ -109,17 +109,17 @@ fn effect(
     bounds: Bounds<ScaledPixels>,
     mask: Bounds<ScaledPixels>,
     factor: f32,
-) -> PaintPostprocess {
+) -> gpui::Primitive {
     let mut uniforms = vec![0; 16];
     uniforms[..4].copy_from_slice(&factor.to_le_bytes());
-    PaintPostprocess {
+    gpui::Primitive::Postprocess(PaintPostprocess {
         order: 0,
         bounds,
         content_mask: ContentMask { bounds: mask },
         owner: owner.clone(),
         uniforms: uniforms.into(),
         feedback: PostprocessFeedback::default(),
-    }
+    })
 }
 
 fn render_and_read(renderer: &mut WgpuRenderer, scene: &Scene) -> Vec<[u8; 4]> {
