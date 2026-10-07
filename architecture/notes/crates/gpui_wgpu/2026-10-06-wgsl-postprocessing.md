@@ -58,9 +58,9 @@ The qualification branch uses a hosted runner because inherited CI requires
 upstream-only infrastructure. A short Cargo home and Git long-path support avoid
 a dependency checkout failure without changing dependencies or the lockfile.
 
-Integrated scene/surface execution, the expanded BGRA/application-ABI fixture,
-and other-platform acceptance remain pending. Source compilation is not hardware
-or window execution and does not complete backend qualification.
+Integrated scene/surface execution and other-platform acceptance remain pending.
+Source compilation is not window execution and does not complete backend
+qualification.
 
 The expanded fixture now lives in `native_postprocess/tests.rs`, using the real
 crate types and implementation; the local standalone launcher reuses this module.
@@ -74,7 +74,20 @@ complete source checking and `cargo test --locked -p gpui_wgpu --lib --no-run`.
 The retained executable and manifest record the source revision and SHA256.
 This removes the need to compile the fixture on the physical acceptance machine;
 the RGBA/BGRA, eight-pass, clipping, ABI, cancellation, and retirement assertions
-still require explicit execution there.
+are exercised by explicitly selecting that test there.
+
+On 2026-10-07 the retained executable was run on an NVIDIA GeForce RTX 5060 Laptop
+GPU, driver 581.57, Vulkan backend. The explicit hardware test passed for both
+RGBA8 and BGRA8, including the actual 4304-byte product ABI, eight-pass pixels,
+excluded input, negative-origin clipping, uniform sequencing, cancellation,
+obsolete epochs, wrong-owner adoption, and acknowledged resource retirement.
+The executable SHA256 was
+`7b649cd2a0be7edde6b706d04a764af58cc756211467545c075d9915e0296cf4`;
+the product ABI SHA256 was
+`86a48243b1cbc035baafac4b43b6aaac5fa212c1da11d0371a9bc37f07bf3e28`.
+One test containing those scenarios passed; its 2.11-second test duration is not
+an application animation benchmark. This exercised the production native
+executor, not `WgpuRenderer::draw`, scene dispatch, or a product window.
 
 ## Supersedes
 
