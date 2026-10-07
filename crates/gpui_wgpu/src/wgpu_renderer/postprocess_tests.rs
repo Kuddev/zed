@@ -214,6 +214,27 @@ fn assert_scene_pixels(actual: &[[u8; 4]], expected: &[[u8; 4]]) {
 }
 
 #[test]
+fn normalized_pixel_oracle_preserves_strict_boundaries() {
+    for red in [127, 128] {
+        assert_scene_pixels(&[[red, 255, 0, 255]], &[[128, 255, 0, 255]]);
+    }
+    for pixel in [[126, 255, 0, 255], [129, 255, 0, 255], [128, 254, 0, 255], [128, 255, 0, 254]] {
+        assert!(
+            std::panic::catch_unwind(|| assert_scene_pixels(&[pixel], &[[128, 255, 0, 255]]))
+                .is_err()
+        );
+    }
+    for red in [63, 64] {
+        assert_scaled_pixel(&[red, 255, 0, 255], 63);
+    }
+    assert!(std::panic::catch_unwind(|| assert_scaled_pixel(&[127, 255, 0, 255], 63)).is_err());
+    assert!(
+        std::panic::catch_unwind(|| assert_scene_pixels(&[[0, 0, 254, 255]], &[[0, 0, 255, 255]]))
+            .is_err()
+    );
+}
+
+#[test]
 #[ignore = "requires hardware Vulkan; constructs a hidden non-activating native window"]
 fn native_surface_scene_order_and_replay() {
     let window = NativeWindow::new();

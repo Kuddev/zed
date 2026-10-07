@@ -62,6 +62,8 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP 'native-wgsl-hardware'
           New-Item -ItemType Directory -Path $out | Out-Null
           Copy-Item -LiteralPath $artifacts[0].executable -Destination "$out/native-postprocess-tests.exe"
+          & "$out/native-postprocess-tests.exe" --exact wgpu_renderer::postprocess_tests::normalized_pixel_oracle_preserves_strict_boundaries
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           @{
             source_revision = $env:GITHUB_SHA
             executable_sha256 = (Get-FileHash "$out/native-postprocess-tests.exe" -Algorithm SHA256).Hash
@@ -87,6 +89,7 @@ jobs:
 
           This job compiles the complete common, WGPU, and Windows renderer sources.
           It also builds, but does not run, the explicit hardware acceptance test.
+          The deterministic pixel-oracle boundary test is executed on this runner.
           The scene test uses a hidden native surface and offscreen frame readback;
           it does not claim visible swapchain presentation or product UI acceptance.
           It does not execute the hardware Vulkan pixel fixture, exercise a window,
