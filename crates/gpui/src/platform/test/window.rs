@@ -247,12 +247,7 @@ impl PlatformWindow for TestWindow {
     }
 
     fn activate(&self) {
-        self.0
-            .lock()
-            .platform
-            .upgrade()
-            .unwrap()
-            .set_active_window(Some(self.clone()))
+        self.0.lock().platform.upgrade().unwrap().set_active_window(Some(self.clone()))
     }
 
     fn is_active(&self) -> bool {
@@ -408,7 +403,7 @@ impl PlatformWindow for TestWindow {
         match payload {
             crate::ExternalDragPayload::Files(paths) => {
                 state.external_drag_files.extend_from_slice(paths.entries());
-            }
+            },
         }
         state.start_external_drag_result
     }
@@ -423,6 +418,7 @@ impl PlatformWindow for TestWindow {
 pub(crate) struct TestAtlasState {
     next_id: u32,
     tiles: HashMap<AtlasKey, AtlasTile>,
+    postprocess_wgsl_supported: bool,
 }
 
 pub(crate) struct TestAtlas(Mutex<TestAtlasState>);
@@ -432,11 +428,21 @@ impl TestAtlas {
         TestAtlas(Mutex::new(TestAtlasState {
             next_id: 0,
             tiles: HashMap::default(),
+            postprocess_wgsl_supported: false,
         }))
     }
 }
 
 impl PlatformAtlas for TestAtlas {
+    fn supports_postprocess_wgsl(&self) -> bool {
+        self.0.lock().postprocess_wgsl_supported
+    }
+
+    fn simulate_postprocess_wgsl_support(&self, supported: bool) -> anyhow::Result<()> {
+        self.0.lock().postprocess_wgsl_supported = supported;
+        Ok(())
+    }
+
     fn get_or_insert_with<'a>(
         &self,
         key: &crate::AtlasKey,
@@ -469,10 +475,7 @@ impl PlatformAtlas for TestAtlas {
                 },
                 tile_id: TileId(tile_id),
                 padding: 0,
-                bounds: crate::Bounds {
-                    origin: Point::default(),
-                    size,
-                },
+                bounds: crate::Bounds { origin: Point::default(), size },
             },
         );
 

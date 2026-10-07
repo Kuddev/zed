@@ -51,6 +51,9 @@ jobs:
       - name: Verify native WGSL compilation and source reuse
         shell: pwsh
         run: cargo test --locked -p gpui_windows --lib directx_atlas::postprocess_wgsl::tests
+      - name: Verify per-window capability reporting
+        shell: pwsh
+        run: cargo test --locked -p gpui --lib window::tests::postprocess_capability_is_per_atlas_and_does_not_install_a_factory
       - name: Build the hardware acceptance executable without running it
         id: hardware-fixture
         shell: pwsh

@@ -271,6 +271,14 @@ impl WgpuAtlas {
 
 impl PlatformAtlas for WgpuAtlas {
     #[cfg(not(target_family = "wasm"))]
+    fn supports_postprocess_wgsl(&self) -> bool {
+        let state = self.0.lock();
+        state.background_preparation_supported
+            && state.postprocess_format.is_some()
+            && !state.shader_lost.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     fn postprocess_wgsl_factory(
         &self,
         id: gpui::StreamImageId,

@@ -1362,6 +1362,18 @@ pub trait PlatformAtlas {
         anyhow::bail!("WGSL surface post-processing is unsupported on this renderer")
     }
 
+    /// Whether this atlas and its current native surface admit WGSL postprocessing.
+    /// This query does not compile programs or allocate effect resources.
+    fn supports_postprocess_wgsl(&self) -> bool {
+        false
+    }
+
+    /// Changes only the virtual atlas's advertised capability, not its native implementation.
+    #[cfg(any(test, feature = "test-support"))]
+    fn simulate_postprocess_wgsl_support(&self, _supported: bool) -> Result<()> {
+        anyhow::bail!("capability simulation requires a virtual atlas")
+    }
+
     fn invalidate_background_preparations_for_test(&self) -> Result<()> {
         anyhow::bail!("background preparation fault injection is unsupported")
     }

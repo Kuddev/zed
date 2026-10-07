@@ -209,6 +209,10 @@ impl DirectXAtlas {
 }
 
 impl PlatformAtlas for DirectXAtlas {
+    fn supports_postprocess_wgsl(&self) -> bool {
+        true
+    }
+
     fn invalidate_background_preparations_for_test(&self) -> anyhow::Result<()> {
         let mut lock = self.0.lock();
         anyhow::ensure!(

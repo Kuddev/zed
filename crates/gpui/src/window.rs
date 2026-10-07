@@ -4426,6 +4426,20 @@ impl Window {
         self.paint_image_tile(bounds, image_bounds, corner_radii, tile, grayscale)
     }
 
+    /// Whether the current renderer and surface admit WGSL terminal postprocessing.
+    pub fn supports_postprocess_wgsl(&self) -> bool {
+        self.sprite_atlas.supports_postprocess_wgsl()
+    }
+
+    /// Changes a virtual window's advertised capability for interaction tests.
+    /// It does not install a native compiler, program, or rendering implementation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_postprocess_wgsl_support(&mut self, supported: bool) -> Result<()> {
+        self.sprite_atlas.simulate_postprocess_wgsl_support(supported)?;
+        self.refresh();
+        Ok(())
+    }
+
     /// Creates a per-window stream owner without allocating a texture or starting cadence.
     pub fn create_stream_image(
         &self,
@@ -6874,6 +6888,42 @@ mod tests {
                 Err(HandleError::Unavailable)
             ));
         });
+    }
+
+    #[gpui::test]
+    fn postprocess_capability_is_per_atlas_and_does_not_install_a_factory(cx: &mut TestAppContext) {
+        let first = cx.add_window(|_, _| EmptyView);
+        let second = cx.add_window(|_, _| EmptyView);
+        first
+            .update(cx, |_, window, cx| {
+                assert!(!window.supports_postprocess_wgsl());
+                window.simulate_postprocess_wgsl_support(true).unwrap();
+                assert!(window.supports_postprocess_wgsl());
+                let owner = window.create_stream_image(
+                    crate::StreamImageBudgets::new(
+                        crate::StreamImageBudget::new(128),
+                        crate::StreamImageBudget::new(128),
+                    ),
+                    cx,
+                );
+                let result = owner.prepare_postprocess_wgsl(
+                    crate::WgslPostprocessDescriptor {
+                        size: size(crate::DevicePixels(1), crate::DevicePixels(1)),
+                        uniform_size: 16,
+                        passes: vec![crate::WgslPostprocessPass {
+                            source: "module".into(),
+                            entry: "main".into(),
+                        }]
+                        .into(),
+                    },
+                    Default::default(),
+                );
+                assert!(result.is_err(), "capability injection is not native preparation evidence");
+                window.simulate_postprocess_wgsl_support(false).unwrap();
+                assert!(!window.supports_postprocess_wgsl());
+            })
+            .unwrap();
+        second.update(cx, |_, window, _| assert!(!window.supports_postprocess_wgsl())).unwrap();
     }
 
     /// Platforms that stop requesting frames for idle windows (currently web)
