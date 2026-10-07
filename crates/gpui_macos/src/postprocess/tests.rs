@@ -200,12 +200,12 @@ fn native_metal_scene_and_retirement() {
         let full = rectangle(0.0, 0.0, 12.0, 4.0);
         let mut scene = background();
         scene.push_layer(full);
-        scene.insert_primitive(effect(
+        scene.insert_primitive(gpui::Primitive::Postprocess(effect(
             &image,
             rectangle(1.0, 1.0, 4.0, 2.0),
             rectangle(2.0, 1.0, 2.0, 2.0),
             0.0,
-        ));
+        )));
         scene.pop_layer();
         scene.insert_primitive(Quad {
             bounds: rectangle(2.0, 1.0, 1.0, 1.0),
@@ -232,8 +232,18 @@ fn native_metal_scene_and_retirement() {
         replay.finish();
         assert_eq!(read(&mut renderer, &replay), pixels);
         let mut repeated = background();
-        repeated.insert_primitive(effect(&image, rectangle(0.0, 0.0, 4.0, 2.0), full, 0.0));
-        repeated.insert_primitive(effect(&image, rectangle(6.0, 0.0, 4.0, 2.0), full, 1.0));
+        repeated.insert_primitive(gpui::Primitive::Postprocess(effect(
+            &image,
+            rectangle(0.0, 0.0, 4.0, 2.0),
+            full,
+            0.0,
+        )));
+        repeated.insert_primitive(gpui::Primitive::Postprocess(effect(
+            &image,
+            rectangle(6.0, 0.0, 4.0, 2.0),
+            full,
+            1.0,
+        )));
         repeated.finish();
         let pixels = read(&mut renderer, &repeated);
         assert_eq!(pixels.get_pixel(0, 0).0, [0, 255, 0, 255]);
@@ -246,7 +256,12 @@ fn native_metal_scene_and_retirement() {
             prepare(&image, descriptor(&entries));
             assert_eq!(budget.used(), 64);
             let mut scene = background();
-            scene.insert_primitive(effect(&image, rectangle(-2.0, 0.0, 4.0, 2.0), full, 1.0));
+            scene.insert_primitive(gpui::Primitive::Postprocess(effect(
+                &image,
+                rectangle(-2.0, 0.0, 4.0, 2.0),
+                full,
+                1.0,
+            )));
             scene.finish();
             let pixels = read(&mut renderer, &scene);
             let expected = if entries.len() == 8 {
@@ -346,7 +361,7 @@ fn native_metal_scene_and_retirement() {
         }
         frame.uniforms = uniforms.into();
         let mut scene = background();
-        scene.insert_primitive(frame);
+        scene.insert_primitive(gpui::Primitive::Postprocess(frame));
         scene.finish();
         assert_eq!(
             read(&mut renderer, &scene).get_pixel(0, 0).0,

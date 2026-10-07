@@ -335,7 +335,7 @@ fn target(
 }
 
 fn render_pass(texture: &TextureRef) -> Result<metal::RenderPassDescriptor> {
-    let descriptor = metal::RenderPassDescriptor::new();
+    let descriptor = metal::RenderPassDescriptor::new().to_owned();
     let color = descriptor
         .color_attachments()
         .object_at(0)
