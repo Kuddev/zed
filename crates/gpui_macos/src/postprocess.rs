@@ -238,6 +238,27 @@ impl PostprocessAtlas {
         let Some(region) = region(screen, effect.bounds, effect.content_mask.bounds)? else {
             return Ok(());
         };
+        // 先保留租约，后续编码即使返回错误，已记录的命令仍由完成回调负责释放。
+        let retained = Cell::new(Some(resources.clone()));
+        let device = self.device.clone();
+        let feedback = effect.feedback.clone();
+        let block = ConcreteBlock::new(move |command: &CommandBufferRef| {
+            if let Some(resources) = retained.take() {
+                if command.status() != metal::MTLCommandBufferStatus::Completed {
+                    resources.lease.budgets().revoke();
+                    device.lost.store(true, Ordering::Release);
+                    feedback.record_error(format!(
+                        "Metal effect submission failed: {:?}",
+                        command.status()
+                    ));
+                }
+                // 回调运行时 GPU 已结束访问；失败也先撤销准入，再释放实际完成的资源。
+                drop(resources);
+            }
+        })
+        .copy();
+        command.add_completed_handler(&block);
+
         let input = &resources.targets[0];
         clear(command, input)?;
         let blit = command.new_blit_command_encoder();
@@ -286,25 +307,6 @@ impl PostprocessAtlas {
         );
         blit.end_encoding();
 
-        let retained = Cell::new(Some(resources.clone()));
-        let device = self.device.clone();
-        let feedback = effect.feedback.clone();
-        let block = ConcreteBlock::new(move |command: &CommandBufferRef| {
-            if let Some(resources) = retained.take() {
-                if command.status() != metal::MTLCommandBufferStatus::Completed {
-                    resources.lease.budgets().revoke();
-                    device.lost.store(true, Ordering::Release);
-                    feedback.record_error(format!(
-                        "Metal effect submission failed: {:?}",
-                        command.status()
-                    ));
-                }
-                // 回调运行时 GPU 已结束访问；失败也先撤销准入，再释放实际完成的资源。
-                drop(resources);
-            }
-        })
-        .copy();
-        command.add_completed_handler(&block);
         Ok(())
     }
 

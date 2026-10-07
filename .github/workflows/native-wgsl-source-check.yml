@@ -48,7 +48,7 @@ jobs:
       - name: Fetch the exact product ABI
         run: |
           curl --fail --location --output "$RUNNER_TEMP/effect-abi.wgsl" https://raw.githubusercontent.com/Kuddev/pebrel/b9a335afa64d8dc4f799584d5f1a6acb67b37e77/nebula_app/src/gpui_shell/terminal/effects/abi.wgsl
-          echo "86a48243b1cbc035baafac4b43b6aaac5fa212c1da11d0371a9bc37f07bf3e28  $RUNNER_TEMP/effect-abi.wgsl" | shasum -a 256 -c -
+          echo "8da9c4272f2f973862a5fb2684dcd563d83551d06ca4898bd9171c1949f39336  $RUNNER_TEMP/effect-abi.wgsl" | shasum -a 256 -c -
           echo "PEBREL_EFFECT_ABI=$RUNNER_TEMP/effect-abi.wgsl" >> "$GITHUB_ENV"
       - name: Compile the actual product frame ABI
         run: cargo test --locked -p gpui_macos --lib postprocess::tests::product_abi_compiles_with_the_native_msl_compiler -- --ignored --exact --nocapture
