@@ -67,6 +67,7 @@ jobs:
             executable_sha256 = (Get-FileHash "$out/native-postprocess-tests.exe" -Algorithm SHA256).Hash
             hardware_execution = 'not run'
             test_filter = 'native_postprocess::tests::native_vulkan_postprocess_contract'
+            scene_test_filter = 'wgpu_renderer::postprocess_tests::native_surface_scene_order_and_replay'
             abi_input = 'PEBREL_EFFECT_ABI must point to the actual UTF-8 product ABI file'
           } | ConvertTo-Json | Set-Content -Encoding utf8 "$out/manifest.json"
           "directory=$out" >> $env:GITHUB_OUTPUT
@@ -86,6 +87,8 @@ jobs:
 
           This job compiles the complete common, WGPU, and Windows renderer sources.
           It also builds, but does not run, the explicit hardware acceptance test.
+          The scene test uses a hidden native surface and offscreen frame readback;
+          it does not claim visible swapchain presentation or product UI acceptance.
           It does not execute the hardware Vulkan pixel fixture, exercise a window,
           qualify Metal, or change the application's pinned dependencies.
           "@ >> $env:GITHUB_STEP_SUMMARY

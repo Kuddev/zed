@@ -15,6 +15,10 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+#[cfg(all(test, windows))]
+#[path = "wgpu_renderer/postprocess_tests.rs"]
+mod postprocess_tests;
+
 const MAX_INSTANCE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
