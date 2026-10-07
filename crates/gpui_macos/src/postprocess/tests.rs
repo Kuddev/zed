@@ -51,7 +51,7 @@ fn compile_msl(pass: &WgslPostprocessPass, uniform_size: usize) {
             "-sdk",
             "macosx",
             "metal",
-            "-std=metal2.1",
+            "-std=macos-metal2.1",
             "-x",
             "metal",
             "-c",
