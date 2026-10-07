@@ -8000,6 +8000,7 @@ dependencies = [
  "mach2 0.5.0",
  "media",
  "metal",
+ "naga",
  "objc",
  "objc2 0.6.3",
  "objc2-app-kit 0.3.2",

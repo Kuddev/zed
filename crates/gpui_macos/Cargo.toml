@@ -19,7 +19,7 @@ font-kit = ["dep:font-kit"]
 screen-capture = ["gpui/screen-capture"]
 
 [dependencies]
-gpui.workspace = true
+gpui = { workspace = true, features = ["wgsl-postprocess"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 accesskit.workspace = true
@@ -51,6 +51,7 @@ log.workspace = true
 mach2.workspace = true
 media.workspace = true
 metal.workspace = true
+naga = { version = "29.0.4", features = ["msl-out"] }
 objc.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true

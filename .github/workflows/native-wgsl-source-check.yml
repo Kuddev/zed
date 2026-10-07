@@ -8,6 +8,7 @@ on:
       - crates/gpui/**
       - crates/gpui_wgpu/**
       - crates/gpui_windows/**
+      - crates/gpui_macos/**
       - Cargo.toml
       - Cargo.lock
   workflow_dispatch:
@@ -20,6 +21,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  metal-source:
+    if: github.repository == 'Kuddev/zed'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-26-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - name: Install the pinned compiler
+        run: rustup toolchain install 1.97.1 --profile minimal --no-self-update
+      - name: Check the complete native Metal sources
+        run: cargo check --locked -p gpui_macos --lib
+      - name: Compile ordered WGSL entries with the native MSL compiler
+        run: cargo test --locked -p gpui_macos --lib postprocess::tests::selected_entries_compile_with_the_native_msl_compiler -- --exact --nocapture
+      - name: Fetch the exact product ABI
+        run: |
+          curl --fail --location --output "$RUNNER_TEMP/effect-abi.wgsl" https://raw.githubusercontent.com/Kuddev/pebrel/b9a335afa64d8dc4f799584d5f1a6acb67b37e77/nebula_app/src/gpui_shell/terminal/effects/abi.wgsl
+          echo "86a48243b1cbc035baafac4b43b6aaac5fa212c1da11d0371a9bc37f07bf3e28  $RUNNER_TEMP/effect-abi.wgsl" | shasum -a 256 -c -
+          echo "PEBREL_EFFECT_ABI=$RUNNER_TEMP/effect-abi.wgsl" >> "$GITHUB_ENV"
+      - name: Compile the actual product frame ABI
+        run: cargo test --locked -p gpui_macos --lib postprocess::tests::product_abi_compiles_with_the_native_msl_compiler -- --ignored --exact --nocapture
+      - name: Exercise native Metal scene pixels and resource retirement
+        run: cargo test --locked -p gpui_macos --lib postprocess::tests::native_metal_scene_and_retirement -- --ignored --exact --nocapture
   native-source:
     if: github.repository == 'Kuddev/zed'
     runs-on: windows-2022

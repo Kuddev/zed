@@ -441,7 +441,7 @@ impl MetalRenderer {
     }
 
     pub fn destroy(&self) {
-        // nothing to do
+        self.sprite_atlas.postprocess.destroy();
     }
 
     pub fn draw(&mut self, scene: &Scene) {
@@ -458,6 +458,10 @@ impl MetalRenderer {
         let viewport_size: Size<DevicePixels> = size(
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
+        );
+        // 无效果的普通窗口保留直接呈现优化；局部后处理需要在 GPU 上复制窗口纹理。
+        layer.set_framebuffer_only(
+            !cfg!(any(test, feature = "test-support")) && scene.postprocesses.is_empty(),
         );
         let drawable = if let Some(drawable) = layer.next_drawable() {
             drawable
@@ -732,11 +736,33 @@ impl MetalRenderer {
                     command_encoder,
                 ),
                 PrimitiveBatch::Postprocesses(range) => {
+                    command_encoder.end_encoding();
                     for effect in &scene.postprocesses[range] {
-                        effect.feedback.record_error(
-                            "surface post-processing is not available on this backend".into(),
-                        );
+                        let result = (|| {
+                            anyhow::ensure!(
+                                effect.uniforms.len() <= 16 * 1024,
+                                "effect uniform size exceeded"
+                            );
+                            // 每次绘制各占一个对齐切片，兼容大于 4 KiB 的 ABI 和同一 owner 的多次使用。
+                            let uniforms = writer.write(&effect.uniforms)?;
+                            self.sprite_atlas.postprocess.render(
+                                command_buffer,
+                                texture,
+                                effect,
+                                &uniforms.buffer,
+                                uniforms.offset,
+                            )
+                        })();
+                        if let Err(error) = result {
+                            effect.feedback.record_error(format!("{error:#}"));
+                        }
                     }
+                    command_encoder = new_command_encoder_for_texture(
+                        command_buffer,
+                        texture,
+                        viewport_size,
+                        None,
+                    );
                 }
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }

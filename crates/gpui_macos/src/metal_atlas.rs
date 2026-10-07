@@ -10,21 +10,27 @@ use metal::Device;
 use parking_lot::Mutex;
 use std::borrow::Cow;
 
-pub(crate) struct MetalAtlas(Mutex<MetalAtlasState>);
+pub(crate) struct MetalAtlas {
+    state: Mutex<MetalAtlasState>,
+    pub(crate) postprocess: crate::postprocess::PostprocessAtlas,
+}
 
 impl MetalAtlas {
     pub(crate) fn new(device: Device, is_apple_gpu: bool) -> Self {
-        MetalAtlas(Mutex::new(MetalAtlasState {
-            device: AssertSend(device),
-            is_apple_gpu,
-            monochrome_textures: Default::default(),
-            polychrome_textures: Default::default(),
-            tiles_by_key: Default::default(),
-        }))
+        MetalAtlas {
+            postprocess: crate::postprocess::PostprocessAtlas::new(device.clone()),
+            state: Mutex::new(MetalAtlasState {
+                device: AssertSend(device),
+                is_apple_gpu,
+                monochrome_textures: Default::default(),
+                polychrome_textures: Default::default(),
+                tiles_by_key: Default::default(),
+            }),
+        }
     }
 
     pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> metal::Texture {
-        self.0.lock().texture(id).metal_texture.clone()
+        self.state.lock().texture(id).metal_texture.clone()
     }
 }
 
@@ -37,12 +43,47 @@ struct MetalAtlasState {
 }
 
 impl PlatformAtlas for MetalAtlas {
+    fn supports_postprocess_wgsl(&self) -> bool {
+        self.postprocess.supported()
+    }
+
+    fn postprocess_wgsl_factory(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        descriptor: gpui::WgslPostprocessDescriptor,
+        cancellation: gpui::BackgroundShaderCancellation,
+    ) -> Result<Box<dyn FnOnce() -> Result<Option<gpui::PreparedStreamImage>> + Send>> {
+        self.postprocess
+            .factory(id, budgets, descriptor, cancellation)
+    }
+
+    fn adopt_postprocess(
+        &self,
+        id: gpui::StreamImageId,
+        prepared: gpui::PreparedStreamImage,
+    ) -> Result<()> {
+        self.postprocess.adopt(id, prepared)
+    }
+
+    fn retire_stream_image(
+        &self,
+        id: gpui::StreamImageId,
+    ) -> Result<Option<gpui::StreamImageCompletion>> {
+        self.postprocess.retire(id)?;
+        Ok(None)
+    }
+
+    fn invalidate_background_preparations_for_test(&self) -> Result<()> {
+        self.postprocess.invalidate()
+    }
+
     fn get_or_insert_with<'a>(
         &self,
         key: &AtlasKey,
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>> {
-        let mut lock = self.0.lock();
+        let mut lock = self.state.lock();
         if let Some(tile) = lock.tiles_by_key.get(key) {
             Ok(Some(*tile))
         } else {
@@ -60,7 +101,7 @@ impl PlatformAtlas for MetalAtlas {
     }
 
     fn remove(&self, key: &AtlasKey) {
-        let mut lock = self.0.lock();
+        let mut lock = self.state.lock();
         let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };

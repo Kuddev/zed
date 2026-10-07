@@ -17,6 +17,7 @@ mod screen_capture;
 
 mod metal_atlas;
 pub mod metal_renderer;
+mod postprocess;
 
 use metal_renderer as renderer;
 
