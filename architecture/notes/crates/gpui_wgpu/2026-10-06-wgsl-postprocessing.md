@@ -58,9 +58,8 @@ The qualification branch uses a hosted runner because inherited CI requires
 upstream-only infrastructure. A short Cargo home and Git long-path support avoid
 a dependency checkout failure without changing dependencies or the lockfile.
 
-Integrated scene/surface execution and other-platform acceptance remain pending.
-Source compilation is not window execution and does not complete backend
-qualification.
+Visible swapchain presentation and other-platform acceptance remain pending.
+Source compilation alone does not complete backend qualification.
 
 The expanded fixture now lives in `native_postprocess/tests.rs`, using the real
 crate types and implementation; the local standalone launcher reuses this module.
@@ -88,6 +87,24 @@ the product ABI SHA256 was
 One test containing those scenarios passed; its 2.11-second test duration is not
 an application animation benchmark. This exercised the production native
 executor, not `WgpuRenderer::draw`, scene dispatch, or a product window.
+
+The separate scene test at `4e1448b84844b16376ccd72bc02df4a84987dcde`
+then passed on the same physical Vulkan GPU with a BGRA8 surface. It creates a
+hidden, non-activating native window, negotiates the actual surface capabilities,
+uses the public owner factory/adoption interface, and invokes production
+`WgpuRenderer::record_frame` with offscreen pixel readback. Assertions cover
+effect/overlay ordering across layer exit, clipping, scene replay, repeated-owner
+uniform isolation, and native retirement. It does not present a visible swapchain
+frame or execute the product's terminal view.
+
+The first scene attempt rejected red=127 where the oracle demanded 128. The
+[Vulkan conversion rules](https://github.com/KhronosGroup/Vulkan-Docs/blob/main/chapters/fundamentals.adoc)
+allow either adjacent integer for fractional UNORM conversion. Only that
+quantized channel now accepts 127/128 or 63/64; alpha, endpoints, overlays, and
+outside-region pixels remain exact. A deterministic positive/negative oracle
+test passed remotely before the hardware rerun. Production rendering code was
+not changed to satisfy the oracle. The successful scene executable SHA256 is
+`e6715e901964118837bb40044f65dd3fc04228f0171dd2971b96fae0a2845778`.
 
 ## Supersedes
 
