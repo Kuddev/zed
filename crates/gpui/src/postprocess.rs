@@ -5,7 +5,7 @@ use std::sync::Arc;
 #[path = "postprocess/wgsl.rs"]
 mod wgsl;
 #[cfg(feature = "wgsl-postprocess")]
-pub use wgsl::validate_postprocess_wgsl;
+pub use wgsl::{validate_postprocess_wgsl, validate_postprocess_wgsl_module};
 
 /// Prepared native programs for an ordered, exact-resolution surface effect.
 #[derive(Clone)]
@@ -84,14 +84,19 @@ fn validate_uniform_size(uniform_size: usize) -> Result<()> {
 }
 
 fn validate_source(source: &str, entry: &str) -> Result<()> {
+    validate_source_size(source)?;
+    anyhow::ensure!(
+        !entry.is_empty() && entry.len() <= 256 && !entry.chars().any(char::is_control),
+        "invalid WGSL effect entry"
+    );
+    Ok(())
+}
+
+fn validate_source_size(source: &str) -> Result<()> {
     // 传输包含应用的 ABI 前缀，不能把用户文件的 64 KiB 上限误用于拼接后的模块。
     anyhow::ensure!(
         !source.is_empty() && source.len() <= 128 * 1024,
         "invalid WGSL effect module size"
-    );
-    anyhow::ensure!(
-        !entry.is_empty() && entry.len() <= 256 && !entry.chars().any(char::is_control),
-        "invalid WGSL effect entry"
     );
     Ok(())
 }

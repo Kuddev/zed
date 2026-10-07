@@ -9,6 +9,17 @@ pub fn validate_postprocess_wgsl(
     uniform_size: usize,
 ) -> Result<(naga::Module, naga::valid::ModuleInfo)> {
     super::validate_source(source, entry)?;
+    let (module, info) = validate_postprocess_wgsl_module(source, uniform_size)?;
+    ensure!(module.entry_points.iter().any(|point| point.name == entry), "effect entry is missing");
+    Ok((module, info))
+}
+
+/// Validates all entries once so application loaders can retain declaration order.
+pub fn validate_postprocess_wgsl_module(
+    source: &str,
+    uniform_size: usize,
+) -> Result<(naga::Module, naga::valid::ModuleInfo)> {
+    super::validate_source_size(source)?;
     super::validate_uniform_size(uniform_size)?;
     let module = naga::front::wgsl::parse_str(source)
         .map_err(|error| anyhow::anyhow!(error.emit_to_string(source)))?;
@@ -84,7 +95,6 @@ pub fn validate_postprocess_wgsl(
             "effect output must be location0 vec4<f32>"
         );
     }
-    ensure!(module.entry_points.iter().any(|point| point.name == entry), "effect entry is missing");
     let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),
