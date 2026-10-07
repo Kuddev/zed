@@ -17,7 +17,7 @@ font-kit = ["dep:font-kit"]
 
 [dependencies]
 naga = { version = "29.0.4", features = ["wgsl-in"] }
-gpui.workspace = true
+gpui = { workspace = true, features = ["wgsl-postprocess"] }
 anyhow.workspace = true
 bytemuck = "1"
 collections.workspace = true

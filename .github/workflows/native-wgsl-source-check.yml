@@ -48,6 +48,9 @@ jobs:
       - name: Check complete native renderer sources
         shell: pwsh
         run: cargo check --locked -p gpui -p gpui_wgpu -p gpui_windows --lib
+      - name: Verify native WGSL compilation and source reuse
+        shell: pwsh
+        run: cargo test --locked -p gpui_windows --lib directx_atlas::postprocess_wgsl::tests
       - name: Build the hardware acceptance executable without running it
         id: hardware-fixture
         shell: pwsh

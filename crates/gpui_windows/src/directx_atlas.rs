@@ -1,6 +1,8 @@
 use collections::FxHashMap;
 #[path = "postprocess.rs"]
 mod postprocess;
+#[path = "postprocess_wgsl.rs"]
+mod postprocess_wgsl;
 #[path = "stream_image.rs"]
 mod stream_image;
 use etagere::BucketedAtlasAllocator;
@@ -39,6 +41,11 @@ struct PreparedNativeBackground {
     image: NativeStreamImage,
     device_epoch: u64,
 }
+enum PostprocessInput {
+    Bytecode(gpui::PostprocessDescriptor),
+    Wgsl(gpui::WgslPostprocessDescriptor),
+}
+
 struct PreparedNativePostprocess {
     effect: NativePostprocess,
     device_epoch: u64,
@@ -70,6 +77,54 @@ impl DirectXAtlas {
             }),
             unsafe { GetCurrentThreadId() },
         )
+    }
+
+    fn postprocess_preparation(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        input: PostprocessInput,
+        cancellation: gpui::BackgroundShaderCancellation,
+    ) -> anyhow::Result<Box<dyn FnOnce() -> anyhow::Result<Option<gpui::PreparedStreamImage>> + Send>>
+    {
+        let state = self.0.lock();
+        anyhow::ensure!(
+            !state.streams.contains_key(&id.value()) && !state.effects.contains_key(&id.value()),
+            "effect source owner is already occupied"
+        );
+        let device = state.device.clone();
+        let context = state.device_context.clone();
+        let epoch = state.device_epoch;
+        let thread = self.1;
+        let budgets = budgets.clone();
+        Ok(Box::new(move || {
+            anyhow::ensure!(
+                unsafe { GetCurrentThreadId() } != thread,
+                "effect factory ran on its UI thread"
+            );
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            let descriptor = match input {
+                PostprocessInput::Bytecode(descriptor) => descriptor,
+                PostprocessInput::Wgsl(descriptor) => {
+                    let Some(descriptor) = postprocess_wgsl::compile(&descriptor, &cancellation)?
+                    else {
+                        return Ok(None);
+                    };
+                    descriptor
+                },
+            };
+            let effect = NativePostprocess::new(&device, &context, id, &budgets, descriptor)?;
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            budgets.ensure_available()?;
+            Ok(Some(gpui::PreparedStreamImage::new(
+                id,
+                PreparedNativePostprocess { effect, device_epoch: epoch, cancellation },
+            )))
+        }))
     }
 
     pub(crate) fn get_texture_view(
@@ -207,34 +262,23 @@ impl PlatformAtlas for DirectXAtlas {
         cancellation: gpui::BackgroundShaderCancellation,
     ) -> anyhow::Result<Box<dyn FnOnce() -> anyhow::Result<Option<gpui::PreparedStreamImage>> + Send>>
     {
-        let state = self.0.lock();
-        anyhow::ensure!(
-            !state.streams.contains_key(&id.value()) && !state.effects.contains_key(&id.value()),
-            "effect source owner is already occupied"
-        );
-        let device = state.device.clone();
-        let context = state.device_context.clone();
-        let epoch = state.device_epoch;
-        let thread = self.1;
-        let budgets = budgets.clone();
-        Ok(Box::new(move || {
-            anyhow::ensure!(
-                unsafe { GetCurrentThreadId() } != thread,
-                "effect factory ran on its UI thread"
-            );
-            if cancellation.is_cancelled() {
-                return Ok(None);
-            }
-            let effect = NativePostprocess::new(&device, &context, id, &budgets, descriptor)?;
-            if cancellation.is_cancelled() {
-                return Ok(None);
-            }
-            budgets.ensure_available()?;
-            Ok(Some(gpui::PreparedStreamImage::new(
-                id,
-                PreparedNativePostprocess { effect, device_epoch: epoch, cancellation },
-            )))
-        }))
+        self.postprocess_preparation(
+            id,
+            budgets,
+            PostprocessInput::Bytecode(descriptor),
+            cancellation,
+        )
+    }
+    fn postprocess_wgsl_factory(
+        &self,
+        id: gpui::StreamImageId,
+        budgets: &gpui::StreamImageBudgets,
+        descriptor: gpui::WgslPostprocessDescriptor,
+        cancellation: gpui::BackgroundShaderCancellation,
+    ) -> anyhow::Result<Box<dyn FnOnce() -> anyhow::Result<Option<gpui::PreparedStreamImage>> + Send>>
+    {
+        descriptor.validate()?;
+        self.postprocess_preparation(id, budgets, PostprocessInput::Wgsl(descriptor), cancellation)
     }
     fn adopt_postprocess(
         &self,

@@ -1,6 +1,12 @@
 use crate::{Bounds, ContentMask, DevicePixels, DrawOrder, Result, ScaledPixels, Size};
 use std::sync::Arc;
 
+#[cfg(feature = "wgsl-postprocess")]
+#[path = "postprocess/wgsl.rs"]
+mod wgsl;
+#[cfg(feature = "wgsl-postprocess")]
+pub use wgsl::validate_postprocess_wgsl;
+
 /// Prepared native programs for an ordered, exact-resolution surface effect.
 #[derive(Clone)]
 pub struct PostprocessDescriptor {
@@ -51,17 +57,7 @@ impl WgslPostprocessDescriptor {
     pub fn validate(&self) -> Result<()> {
         validate_layout(self.size, self.uniform_size, self.passes.len())?;
         for pass in self.passes.iter() {
-            // 传输包含应用的 ABI 前缀，不能把用户文件的 64 KiB 上限误用于拼接后的模块。
-            anyhow::ensure!(
-                !pass.source.is_empty() && pass.source.len() <= 128 * 1024,
-                "invalid WGSL effect module size"
-            );
-            anyhow::ensure!(
-                !pass.entry.is_empty()
-                    && pass.entry.len() <= 256
-                    && !pass.entry.chars().any(char::is_control),
-                "invalid WGSL effect entry"
-            );
+            validate_source(&pass.source, &pass.entry)?;
         }
         self.texture_bytes()?;
         Ok(())
@@ -74,11 +70,29 @@ impl WgslPostprocessDescriptor {
 
 fn validate_layout(size: Size<DevicePixels>, uniform_size: usize, passes: usize) -> Result<()> {
     anyhow::ensure!(size.width.0 > 0 && size.height.0 > 0, "empty effect surface");
+    validate_uniform_size(uniform_size)?;
+    anyhow::ensure!((1..=8).contains(&passes), "an effect requires between one and eight passes");
+    Ok(())
+}
+
+fn validate_uniform_size(uniform_size: usize) -> Result<()> {
     anyhow::ensure!(
         (16..=16 * 1024).contains(&uniform_size) && uniform_size % 16 == 0,
         "effect uniforms must contain 16-byte blocks within 16 KiB"
     );
-    anyhow::ensure!((1..=8).contains(&passes), "an effect requires between one and eight passes");
+    Ok(())
+}
+
+fn validate_source(source: &str, entry: &str) -> Result<()> {
+    // 传输包含应用的 ABI 前缀，不能把用户文件的 64 KiB 上限误用于拼接后的模块。
+    anyhow::ensure!(
+        !source.is_empty() && source.len() <= 128 * 1024,
+        "invalid WGSL effect module size"
+    );
+    anyhow::ensure!(
+        !entry.is_empty() && entry.len() <= 256 && !entry.chars().any(char::is_control),
+        "invalid WGSL effect entry"
+    );
     Ok(())
 }
 

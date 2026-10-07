@@ -17,9 +17,10 @@ test-support = ["gpui/test-support"]
 screen-capture = ["gpui/screen-capture", "scap"]
 
 [dependencies]
-gpui.workspace = true
+gpui = { workspace = true, features = ["wgsl-postprocess"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+naga = { version = "29.0.4", features = ["hlsl-out"] }
 accesskit.workspace = true
 accesskit_windows.workspace = true
 anyhow.workspace = true
