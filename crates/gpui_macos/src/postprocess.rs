@@ -351,8 +351,9 @@ fn render_pass(texture: &TextureRef) -> Result<metal::RenderPassDescriptor> {
 
 fn clear(command: &CommandBufferRef, texture: &TextureRef) -> Result<()> {
     // 输入裁剪以外必须清透明；只裁剪最终写回仍会暴露相邻窗格的像素。
+    let descriptor = render_pass(texture)?;
     command
-        .new_render_command_encoder(&render_pass(texture)?)
+        .new_render_command_encoder(&descriptor)
         .end_encoding();
     Ok(())
 }
