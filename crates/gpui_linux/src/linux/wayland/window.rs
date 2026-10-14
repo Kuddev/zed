@@ -1623,6 +1623,9 @@ impl PlatformWindow for WaylandWindow {
     fn set_visible(&self, visible: bool) -> bool {
         let mut state = self.borrow_mut();
         if !visible {
+            // 隐藏是最后一次用户意图；首帧后不能再消费先前排队的激活请求。
+            state.pending_activation_token = None;
+            state.activate_on_first_frame = false;
             if state.shown {
                 if let Some(toplevel) = state.surface_state.toplevel() {
                     toplevel.set_minimized();
