@@ -878,6 +878,28 @@ enum WmHintPropertyState {
 }
 
 impl X11Window {
+    fn map_native_window(&self) -> anyhow::Result<()> {
+        check_reply(
+            || "X11 MapWindow failed.",
+            self.0.xcb.map_window(self.0.x_window),
+        )?;
+
+        // The checked round trip can buffer MapNotify/Expose in XCB while
+        // leaving its fd unreadable. MapNotify starts the refresh timer, so
+        // waiting for another native event can otherwise strand the first
+        // frame. Defer the drain until Window::new releases its App borrow.
+        if let Some(client) = self.0.state.borrow().client.get_client() {
+            let state = client.0.borrow();
+            let connection = self.0.xcb.clone();
+            state.loop_handle.insert_idle(move |client| {
+                client.process_x11_events(&connection).log_err();
+            });
+            // An idle callback alone does not wake a blocked calloop dispatch.
+            state.common.signal.wakeup();
+        }
+        Ok(())
+    }
+
     pub fn new(
         handle: AnyWindowHandle,
         client: X11ClientStatePtr,
@@ -1492,6 +1514,27 @@ impl PlatformWindow for X11Window {
         xcb_flush(&self.0.xcb);
     }
 
+    fn set_visible(&self, visible: bool) -> bool {
+        let result = if visible {
+            self.map_native_window()
+        } else {
+            check_reply(
+                || "X11 UnmapWindow failed.",
+                self.0.xcb.unmap_window(self.0.x_window),
+            )
+        };
+        match result {
+            Ok(()) => {
+                xcb_flush(&self.0.xcb);
+                true
+            }
+            Err(error) => {
+                log::warn!("Could not change X11 window visibility: {error}");
+                false
+            }
+        }
+    }
+
     fn request_attention(&self) {
         if self.is_active() {
             return;
@@ -1574,25 +1617,7 @@ impl PlatformWindow for X11Window {
     }
 
     fn map_window(&mut self) -> anyhow::Result<()> {
-        check_reply(
-            || "X11 MapWindow failed.",
-            self.0.xcb.map_window(self.0.x_window),
-        )?;
-
-        // The checked round trip can buffer MapNotify/Expose in XCB while
-        // leaving its fd unreadable. MapNotify starts the refresh timer, so
-        // waiting for another native event can otherwise strand the first
-        // frame. Defer the drain until Window::new releases its App borrow.
-        if let Some(client) = self.0.state.borrow().client.get_client() {
-            let state = client.0.borrow();
-            let connection = self.0.xcb.clone();
-            state.loop_handle.insert_idle(move |client| {
-                client.process_x11_events(&connection).log_err();
-            });
-            // An idle callback alone does not wake a blocked calloop dispatch.
-            state.common.signal.wakeup();
-        }
-        Ok(())
+        self.map_native_window()
     }
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {

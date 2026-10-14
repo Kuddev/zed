@@ -1892,7 +1892,9 @@ impl Window {
             platform_window.set_app_id(&app_id);
         }
 
-        platform_window.map_window().unwrap();
+        if show {
+            platform_window.map_window()?;
+        }
 
         Ok(Window {
             handle,
@@ -5691,6 +5693,23 @@ impl Window {
     /// Focus the current window and bring it to the foreground at the platform level.
     pub fn activate_window(&self) {
         self.platform_window.activate();
+    }
+
+    /// Activates this window using an authorization token from the desktop portal.
+    pub fn activate_window_with_token(&self, token: &str) {
+        self.platform_window.activate_with_token(token);
+    }
+
+    /// Keeps the view alive while changing native window visibility. On Wayland,
+    /// hiding an already mapped window requests compositor-managed minimization.
+    pub fn set_window_visible(&self, visible: bool) -> bool {
+        self.platform_window.set_visible(visible)
+    }
+
+    /// Returns the last painted selector bounds for native interaction fixtures.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn debug_bounds_for_selector(&self, selector: &str) -> Option<Bounds<Pixels>> {
+        self.rendered_frame.debug_bounds.get(selector).copied()
     }
 
     /// Requests that the operating system draw attention to this window.

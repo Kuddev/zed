@@ -96,6 +96,10 @@ struct InProgressConfigure {
 pub struct WaylandWindowState {
     surface_state: WaylandSurfaceState,
     acknowledged_first_configure: bool,
+    shown: bool,
+    has_presented: bool,
+    pending_activation_token: Option<String>,
+    activate_on_first_frame: bool,
     parent: Option<WaylandWindowStatePtr>,
     /// Child surfaces mapped to whether they block this window's input (dialogs
     /// block, popups don't). Children are closed before this window closes.
@@ -594,6 +598,10 @@ impl WaylandWindowState {
         Ok(Self {
             surface_state,
             acknowledged_first_configure: false,
+            shown: options.show,
+            has_presented: false,
+            pending_activation_token: None,
+            activate_on_first_frame: false,
             parent,
             children: FxHashMap::default(),
             surface,
@@ -840,6 +848,10 @@ impl WaylandWindowStatePtr {
 
     pub fn frame(&self) {
         let mut state = self.state.borrow_mut();
+        // 隐藏启动仍完成 configure 握手，但不能提交 buffer 或启动帧循环。
+        if !state.shown {
+            return;
+        }
         state.surface.frame(&state.globals.qh, state.surface.id());
         state.resize_throttle = false;
         let force_render = state.force_render_after_recovery;
@@ -1569,6 +1581,13 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn activate(&self) {
+        if !self.borrow().shown {
+            self.set_visible(true);
+        }
+        if !self.borrow().has_presented {
+            self.borrow_mut().activate_on_first_frame = true;
+            return;
+        }
         // Try to request an activation token. Even though the activation is likely going to be rejected,
         // KWin and Mutter can use the app_id to visually indicate we're requesting attention.
         let state = self.borrow();
@@ -1583,6 +1602,55 @@ impl PlatformWindow for WaylandWindow {
             token.set_surface(&state.surface);
             token.commit();
         }
+    }
+
+    fn activate_with_token(&self, token: &str) {
+        if !self.borrow().shown {
+            self.set_visible(true);
+        }
+        let mut state = self.borrow_mut();
+        if state.has_presented {
+            if let Some(activation) = &state.globals.activation {
+                activation.activate(token.to_owned(), &state.surface);
+            }
+        } else {
+            // Portal 令牌只能消费一次；先完成首次映射，不能用旧鼠标 serial 重新申请。
+            state.pending_activation_token = Some(token.to_owned());
+            state.activate_on_first_frame = false;
+        }
+    }
+
+    fn set_visible(&self, visible: bool) -> bool {
+        let mut state = self.borrow_mut();
+        if !visible {
+            if state.shown {
+                if let Some(toplevel) = state.surface_state.toplevel() {
+                    toplevel.set_minimized();
+                } else {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if state.shown {
+            drop(state);
+            self.activate();
+            return true;
+        }
+        state.shown = true;
+        state.force_render_after_recovery = true;
+        if state.acknowledged_first_configure {
+            // request_frame 会回调 App；必须等当前窗口更新释放借用后再绘制。
+            let window = self.0.clone();
+            state
+                .globals
+                .executor
+                .spawn(async move {
+                    window.frame();
+                })
+                .detach();
+        }
+        true
     }
 
     fn request_attention(&self) {}
@@ -1706,6 +1774,12 @@ impl PlatformWindow for WaylandWindow {
 
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
+        if !state.shown
+            || (matches!(state.surface_state, WaylandSurfaceState::Xdg(_))
+                && !state.acknowledged_first_configure)
+        {
+            return;
+        }
 
         if state.renderer.device_lost() {
             let raw_window = RawWindow {
@@ -1730,14 +1804,29 @@ impl PlatformWindow for WaylandWindow {
         }
 
         state.renderer_presented = state.renderer.draw(scene);
+        if state.renderer_presented {
+            state.has_presented = true;
+            if let Some(token) = state.pending_activation_token.take() {
+                if let Some(activation) = &state.globals.activation {
+                    activation.activate(token, &state.surface);
+                }
+            }
+        }
 
         if state.renderer.needs_redraw() {
             state.force_render_after_recovery = true;
+        }
+        if state.has_presented && std::mem::take(&mut state.activate_on_first_frame) {
+            drop(state);
+            self.activate();
         }
     }
 
     fn completed_frame(&self) {
         let mut state = self.borrow_mut();
+        if !state.shown {
+            return;
+        }
 
         // Work around a bug in old versions of wlroots where committing without a buffer attached
         // can cause invalid synchronization that leads to graphical corruption.
