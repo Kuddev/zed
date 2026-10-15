@@ -688,6 +688,8 @@ pub enum ImeInput {
 impl Drop for WaylandWindow {
     fn drop(&mut self) {
         let mut state = self.0.state.borrow_mut();
+        // 原生关闭回调稍后才执行；先释放输入视图，避免退出事件循环时遗留强句柄。
+        state.input_handler = None;
         let surface_id = state.surface.id();
         if let Some(parent) = state.parent.as_ref() {
             parent.state.borrow_mut().children.remove(&surface_id);
