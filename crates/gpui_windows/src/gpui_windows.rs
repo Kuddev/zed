@@ -1,6 +1,7 @@
 #![cfg(target_os = "windows")]
 
 mod clipboard;
+mod cursor_visibility;
 mod destination_list;
 mod direct_manipulation;
 mod direct_write;
@@ -20,6 +21,7 @@ mod window;
 mod wrapper;
 
 pub(crate) use clipboard::*;
+pub(crate) use cursor_visibility::*;
 pub(crate) use destination_list::*;
 pub(crate) use direct_write::*;
 pub(crate) use directx_atlas::*;

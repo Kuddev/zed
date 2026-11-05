@@ -1,4 +1,4 @@
-use std::{cell::Cell, rc::Rc, sync::atomic::Ordering};
+use std::{cell::Cell, rc::Rc};
 
 use anyhow::Context as _;
 use gpui_util::ResultExt;
@@ -346,7 +346,15 @@ impl WindowsWindowInner {
 
     fn handle_mouse_move_msg(&self, handle: HWND, lparam: LPARAM, wparam: WPARAM) -> Option<isize> {
         self.start_tracking_mouse(handle, TME_LEAVE);
-        self.restore_cursor_after_hide();
+        let mut screen_point = POINT {
+            x: lparam.signed_loword().into(),
+            y: lparam.signed_hiword().into(),
+        };
+        if unsafe { ClientToScreen(handle, &mut screen_point) }.as_bool() {
+            self.restore_cursor_after_hide(screen_point);
+        } else {
+            self.restore_cursor_unconditionally();
+        }
 
         let Some(mut func) = self.state.callbacks.input.take() else {
             return Some(1);
@@ -382,7 +390,7 @@ impl WindowsWindowInner {
         self.state.hovered.set(false);
         // The next window's `WM_SETCURSOR` picks its own cursor, so we just clear
         // the flag for tight `is_cursor_visible()` semantics.
-        self.state.cursor_visible.store(true, Ordering::Relaxed);
+        self.state.cursor_visible.reset();
         if let Some(mut callback) = self.state.callbacks.hovered_status_change.take() {
             callback(false);
             self.state
@@ -795,7 +803,7 @@ impl WindowsWindowInner {
         let this = self.clone();
 
         if !activated {
-            this.state.cursor_visible.store(true, Ordering::Relaxed);
+            this.state.cursor_visible.reset();
         }
 
         // When the window is activated (gains focus), reset the modifier tracking state.
@@ -1009,7 +1017,11 @@ impl WindowsWindowInner {
 
     fn handle_nc_mouse_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
         self.start_tracking_mouse(handle, TME_LEAVE | TME_NONCLIENT);
-        self.restore_cursor_after_hide();
+        // Non-client mouse messages already carry screen coordinates.
+        self.restore_cursor_after_hide(POINT {
+            x: lparam.signed_loword().into(),
+            y: lparam.signed_hiword().into(),
+        });
 
         let mut func = self.state.callbacks.input.take()?;
         let scale_factor = self.state.scale_factor.get();
@@ -1175,7 +1187,7 @@ impl WindowsWindowInner {
         {
             return None;
         }
-        let cursor = if self.state.cursor_visible.load(Ordering::Relaxed) {
+        let cursor = if self.state.cursor_visible.is_visible() {
             self.state.current_cursor.get()
         } else {
             None
@@ -1355,9 +1367,24 @@ impl WindowsWindowInner {
         }
     }
 
-    /// Clear the hidden flag and restore the cursor immediately
-    fn restore_cursor_after_hide(&self) {
-        if !self.state.cursor_visible.swap(true, Ordering::Relaxed) {
+    /// Restore a hidden cursor once the pointer has really moved to
+    /// `screen_point`; synthetic moves at the hide position keep it hidden.
+    fn restore_cursor_after_hide(&self, screen_point: POINT) {
+        if self
+            .state
+            .cursor_visible
+            .show_if_moved((screen_point.x, screen_point.y))
+        {
+            unsafe {
+                SetCursor(self.state.current_cursor.get());
+            }
+        }
+    }
+
+    /// Fallback when the move position cannot be mapped to the screen.
+    fn restore_cursor_unconditionally(&self) {
+        if !self.state.cursor_visible.is_visible() {
+            self.state.cursor_visible.reset();
             unsafe {
                 SetCursor(self.state.current_cursor.get());
             }

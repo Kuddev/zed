@@ -75,7 +75,7 @@ pub struct WindowsWindowState {
     pub click_state: ClickState,
     pub current_cursor: Cell<Option<HCURSOR>>,
     /// Shared with [`WindowsPlatformState::cursor_visible`].
-    pub cursor_visible: Arc<AtomicBool>,
+    pub cursor_visible: Arc<CursorVisibility>,
     pub nc_button_pressed: Cell<Option<u32>>,
 
     pub display: Cell<WindowsDisplay>,
@@ -113,7 +113,7 @@ impl WindowsWindowState {
         directx_devices: &DirectXDevices,
         window_params: &CREATESTRUCTW,
         current_cursor: Option<HCURSOR>,
-        cursor_visible: Arc<AtomicBool>,
+        cursor_visible: Arc<CursorVisibility>,
         display: WindowsDisplay,
         min_size: Option<Size<Pixels>>,
         appearance: WindowAppearance,
@@ -386,7 +386,7 @@ struct WindowCreateContext {
     min_size: Option<Size<Pixels>>,
     executor: ForegroundExecutor,
     current_cursor: Option<HCURSOR>,
-    cursor_visible: Arc<AtomicBool>,
+    cursor_visible: Arc<CursorVisibility>,
     drop_target_helper: IDropTargetHelper,
     validation_number: usize,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
