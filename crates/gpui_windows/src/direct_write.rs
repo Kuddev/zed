@@ -77,7 +77,11 @@ struct DirectWriteState {
     custom_font_collection: IDWriteFontCollection1,
     fonts: Vec<FontInfo>,
     font_to_font_id: HashMap<Font, FontId>,
-    font_info_cache: HashMap<usize, FontId>,
+    /// Glyph runs identify their font face by COM object address. Each entry
+    /// retains that face: DirectWrite frees transient fallback faces with their
+    /// layouts and may reuse the address for another font, whose glyph indices
+    /// would otherwise be rasterized with the stale font.
+    font_info_cache: HashMap<usize, (IDWriteFontFace3, FontId)>,
     layout_line_scratch: Vec<u16>,
 }
 
@@ -323,8 +327,9 @@ impl DirectWriteState {
 
             let font_id = FontId(this.fonts.len());
             let font_face_key = info.font_face.cast::<IUnknown>().unwrap().as_raw().addr();
+            let font_face = info.font_face.clone();
             this.fonts.push(info);
-            this.font_info_cache.insert(font_face_key, font_id);
+            this.font_info_cache.insert(font_face_key, (font_face, font_id));
             Some(font_id)
         };
 
@@ -1487,7 +1492,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             .text_system
             .font_info_cache
             .get(&font_face_key)
-            .copied()
+            .map(|(_, font_id)| *font_id)
             // in some circumstances, we might be getting served a FontFace that we did not create ourselves
             // so create a new font from it and cache it accordingly. The usual culprit here seems to be Segoe UI Symbol
             .map_or_else(
@@ -1504,7 +1509,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                     context
                         .text_system
                         .font_info_cache
-                        .insert(font_face_key, font_id);
+                        .insert(font_face_key, (font_face.clone(), font_id));
                     windows::core::Result::Ok(font_id)
                 },
                 Ok,
@@ -1970,6 +1975,127 @@ mod tests {
         for _ in 0..3 {
             let (_, repeated) = text_system.rasterize_glyph(&params, bounds)?;
             assert_eq!(pixels, repeated, "rasterization must be repeatable");
+        }
+        Ok(())
+    }
+
+    /// When a family is registered in memory and is also installed system-wide,
+    /// glyph runs can be served from the system collection while the family's
+    /// `FontId` points at the in-memory face. DirectWrite frees those transient
+    /// faces with their layouts and may allocate another face at the same
+    /// address, so every glyph run must still be attributed to the face that
+    /// produced its glyph indices.
+    #[test]
+    fn glyph_runs_keep_their_served_font_after_layouts_are_released() -> anyhow::Result<()> {
+        use super::*;
+
+        const TEXT: &str = "Close 关闭此标签页？执行指南 AI-执行指南.md 한국어 日本語";
+        let windows_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let (font_bytes, cjk_families): (Vec<Vec<u8>>, Vec<&str>) = [
+            ("msyh.ttc", "Microsoft YaHei UI"),
+            ("malgun.ttf", "Malgun Gothic"),
+            ("simsun.ttc", "SimSun"),
+            ("YuGothR.ttc", "Yu Gothic UI"),
+        ]
+        .into_iter()
+        .filter_map(|(file, family)| {
+            let path = std::path::Path::new(&windows_dir).join("Fonts").join(file);
+            Some((std::fs::read(path).ok()?, family))
+        })
+        .unzip();
+        assert!(
+            cjk_families.len() >= 2,
+            "the test needs at least two system CJK font files"
+        );
+        let new_text_system = |devices: &DirectXDevices| -> anyhow::Result<DirectWriteTextSystem> {
+            let text_system = DirectWriteTextSystem::new(devices)?;
+            text_system.add_fonts(
+                font_bytes
+                    .iter()
+                    .map(|bytes| Cow::Owned(bytes.clone()))
+                    .collect(),
+            )?;
+            Ok(text_system)
+        };
+
+        let fallbacks = FontFallbacks::from_fonts(
+            cjk_families
+                .iter()
+                .map(|family| family.to_string())
+                .collect(),
+        );
+        let styles = [
+            (FontWeight::NORMAL, FontStyle::Normal),
+            (FontWeight::NORMAL, FontStyle::Italic),
+            (FontWeight::SEMIBOLD, FontStyle::Normal),
+            (FontWeight::BOLD, FontStyle::Italic),
+        ];
+        let requests: Vec<Font> = cjk_families
+            .iter()
+            .copied()
+            .chain([
+                "Segoe UI",
+                "Times New Roman",
+                "Consolas",
+                "Cambria",
+                "Arial",
+            ])
+            .flat_map(|family| {
+                let fallbacks = fallbacks.clone();
+                styles.iter().flat_map(move |&(weight, style)| {
+                    [None, Some(fallbacks.clone())].map(|fallbacks| Font {
+                        weight,
+                        style,
+                        fallbacks,
+                        ..font(family)
+                    })
+                })
+            })
+            .collect();
+
+        let shape = |text_system: &DirectWriteTextSystem,
+                     request: &Font|
+         -> anyhow::Result<Vec<(Option<Font>, Vec<GlyphId>)>> {
+            let font_id = text_system.font_id(request)?;
+            let layout = text_system.layout_line(
+                TEXT,
+                px(16.0),
+                &[FontRun {
+                    len: TEXT.len(),
+                    font_id,
+                }],
+            );
+            let state = text_system.state.read();
+            Ok(layout
+                .runs
+                .iter()
+                .map(|run| {
+                    let face = &state.fonts[run.font_id.0].font_face;
+                    (
+                        font_face_to_font(face, &text_system.components.locale),
+                        run.glyphs.iter().map(|glyph| glyph.id).collect(),
+                    )
+                })
+                .collect())
+        };
+
+        let devices = DirectXDevices::new()?;
+        // A fresh text system has no attribution cache, so its first layout is
+        // the expected face for each glyph run.
+        let expected = requests
+            .iter()
+            .map(|request| shape(&new_text_system(&devices)?, request))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let text_system = new_text_system(&devices)?;
+        for round in 0..8 {
+            for (request, expected) in requests.iter().zip(&expected) {
+                assert_eq!(
+                    &shape(&text_system, request)?,
+                    expected,
+                    "round {round}: {request:?} glyph runs were attributed to another face"
+                );
+            }
         }
         Ok(())
     }
