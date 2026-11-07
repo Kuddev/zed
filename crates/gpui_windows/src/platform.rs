@@ -68,7 +68,7 @@ pub(crate) struct WindowsPlatformState {
     // NOTE: standard cursor handles don't need to close.
     pub(crate) current_cursor: Cell<Option<HCURSOR>>,
     /// Shared with each window so `WM_SETCURSOR` can read it directly.
-    pub(crate) cursor_visible: Arc<AtomicBool>,
+    pub(crate) cursor_visible: Arc<CursorVisibility>,
     /// Shared with each window to coordinate draws across windows on the UI
     /// thread; see [`DrawCoordinator`].
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
@@ -97,7 +97,7 @@ impl WindowsPlatformState {
             callbacks,
             jump_list: RefCell::new(jump_list),
             current_cursor: Cell::new(current_cursor),
-            cursor_visible: Arc::new(AtomicBool::new(true)),
+            cursor_visible: Arc::new(CursorVisibility::new()),
             draw_coordinator: Rc::new(DrawCoordinator::new()),
             directx_devices: RefCell::new(directx_devices),
             menus: RefCell::new(Vec::new()),
@@ -749,12 +749,11 @@ impl Platform for WindowsPlatform {
     }
 
     fn hide_cursor_until_mouse_moves(&self) {
-        if !self
-            .inner
-            .state
-            .cursor_visible
-            .swap(false, Ordering::Relaxed)
-        {
+        let mut point = POINT::default();
+        let at = unsafe { GetCursorPos(&mut point) }
+            .ok()
+            .map(|()| (point.x, point.y));
+        if !self.inner.state.cursor_visible.hide(at) {
             return;
         }
 
@@ -770,7 +769,7 @@ impl Platform for WindowsPlatform {
     }
 
     fn is_cursor_visible(&self) -> bool {
-        self.inner.state.cursor_visible.load(Ordering::Relaxed)
+        self.inner.state.cursor_visible.is_visible()
     }
 
     fn should_auto_hide_scrollbars(&self) -> bool {
@@ -1127,7 +1126,7 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) icon: HICON,
     pub(crate) executor: ForegroundExecutor,
     pub(crate) current_cursor: Option<HCURSOR>,
-    pub(crate) cursor_visible: Arc<AtomicBool>,
+    pub(crate) cursor_visible: Arc<CursorVisibility>,
     pub(crate) drop_target_helper: IDropTargetHelper,
     pub(crate) validation_number: usize,
     pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
